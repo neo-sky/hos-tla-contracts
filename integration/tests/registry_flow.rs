@@ -125,6 +125,234 @@ fn signed_transfer(
     (serde_json::to_value(&msg).unwrap(), proof)
 }
 
+struct Env {
+    #[allow(dead_code)]
+    worker: Worker<near_workspaces::network::Sandbox>,
+    admin: Account,
+    registry: Contract,
+    active_signer: Contract,
+    tla: Account,
+    renter: Account,
+}
+
+async fn setup(grant_minter: bool) -> Result<Env> {
+    let worker = near_workspaces::sandbox().await?;
+    let root = worker.root_account()?;
+
+    let admin = root
+        .create_subaccount("admin")
+        .initial_balance(NearToken::from_near(50))
+        .transact()
+        .await?
+        .into_result()?;
+    let recovery = root
+        .create_subaccount("recovery")
+        .initial_balance(NearToken::from_near(10))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let active_signer = deploy_at(&root, "asigner", 30, ACTIVE_SIGNER_WASM).await?;
+    let hos_extension = deploy_at(&root, "hosext", 30, HOS_EXTENSION_WASM).await?;
+    let registry = deploy_at(&root, "registry", 50, TLA_REGISTRY_WASM).await?;
+
+    active_signer
+        .call("new")
+        .args_json(json!({
+            "admin": admin.id(),
+            "marketplace_authority": hos_extension.id(),
+            "recovery_authority": recovery.id(),
+            "timeout_secs": TIMEOUT_SECS,
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+    hos_extension
+        .call("new")
+        .args_json(json!({
+            "admin": admin.id(),
+            "registry": registry.id(),
+            "active_signer": active_signer.id(),
+            "recovery": recovery.id(),
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+    registry
+        .call("new")
+        .args_json(json!({
+            "admin": admin.id(),
+            "hos_extension": hos_extension.id(),
+            "parked_signer_pubkey": ws_pubkey(&user_key(99)),
+            "grace_period_ns": GRACE_NS.to_string(),
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let deployer = root
+        .create_subaccount("deployer")
+        .initial_balance(NearToken::from_near(50))
+        .transact()
+        .await?
+        .into_result()?;
+    let wallet_hash = deploy_wallet_global(&worker, &deployer).await?;
+
+    let tla = root
+        .create_subaccount("mytla")
+        .initial_balance(NearToken::from_near(100))
+        .transact()
+        .await?
+        .into_result()?;
+    let manager_wasm = std::fs::read(TLA_MANAGER_WASM)?;
+    let manager = tla.deploy(&manager_wasm).await?.into_result()?;
+    manager
+        .call("new")
+        .args_json(json!({
+            "registry": registry.id(),
+            "active_signer": active_signer.id(),
+            "hos_extension": hos_extension.id(),
+            "wallet_code_hash": bs58::encode(wallet_hash).into_string(),
+            "min_balance": NearToken::from_near(2),
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    if grant_minter {
+        admin
+            .call(active_signer.id(), "add_minter")
+            .args_json(json!({ "minter": tla.id() }))
+            .transact()
+            .await?
+            .into_result()?;
+    }
+    admin
+        .call(registry.id(), "register_tla")
+        .args_json(json!({
+            "tla_id": tla.id(),
+            "tla_type": "Open",
+            "premium_category": "Standard",
+            "licensee": null,
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+    admin
+        .call(registry.id(), "activate_open_tla")
+        .args_json(json!({ "tla_id": tla.id() }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let renter = root
+        .create_subaccount("renter")
+        .initial_balance(NearToken::from_near(50))
+        .transact()
+        .await?
+        .into_result()?;
+
+    Ok(Env {
+        worker,
+        admin,
+        registry,
+        active_signer,
+        tla,
+        renter,
+    })
+}
+
+#[tokio::test]
+async fn signer_install_failure_keeps_name_then_retry_repairs() -> Result<()> {
+    let env = setup(false).await?;
+    let owner = user_key(7);
+
+    let _ = env
+        .renter
+        .call(env.registry.id(), "rent_sub_account")
+        .args_json(json!({
+            "tla_id": env.tla.id(),
+            "name": "alice",
+            "owner_key": ws_pubkey(&owner),
+            "main_wallet": env.renter.id(),
+        }))
+        .deposit(NearToken::from_near(10))
+        .max_gas()
+        .transact()
+        .await?;
+
+    let wallet_id: AccountId = format!("alice.{}", env.tla.id()).parse()?;
+    let pending: bool = env
+        .registry
+        .view("is_signer_pending")
+        .args_json(json!({ "tla_id": env.tla.id(), "name": "alice" }))
+        .await?
+        .json()?;
+    assert!(
+        pending,
+        "sub must be flagged signer-pending after install failure"
+    );
+    let available: bool = env
+        .registry
+        .view("is_name_available")
+        .args_json(json!({ "tla_id": env.tla.id(), "name": "alice" }))
+        .await?
+        .json()?;
+    assert!(
+        !available,
+        "the name must NOT be freed while the wallet account exists"
+    );
+    let signer: Option<String> = env
+        .active_signer
+        .view("signer_of")
+        .args_json(json!({ "wallet": wallet_id }))
+        .await?
+        .json()?;
+    assert!(signer.is_none(), "no signer should be installed yet");
+
+    env.admin
+        .call(env.active_signer.id(), "add_minter")
+        .args_json(json!({ "minter": env.tla.id() }))
+        .transact()
+        .await?
+        .into_result()?;
+    let retry = env
+        .renter
+        .call(env.registry.id(), "retry_signer_install")
+        .args_json(json!({ "tla_id": env.tla.id(), "name": "alice" }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        retry.is_success(),
+        "retry_signer_install must repair the pending sub: {retry:#?}"
+    );
+
+    let pending_after: bool = env
+        .registry
+        .view("is_signer_pending")
+        .args_json(json!({ "tla_id": env.tla.id(), "name": "alice" }))
+        .await?
+        .json()?;
+    assert!(
+        !pending_after,
+        "pending flag cleared after successful retry"
+    );
+    let signer_after: Option<String> = env
+        .active_signer
+        .view("signer_of")
+        .args_json(json!({ "wallet": wallet_id }))
+        .await?
+        .json()?;
+    assert_eq!(
+        signer_after.as_deref(),
+        Some(raw_base58(&owner).as_str()),
+        "owner key installed on active-signer after retry"
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn full_registry_mint_flow() -> Result<()> {
     let worker = near_workspaces::sandbox().await?;

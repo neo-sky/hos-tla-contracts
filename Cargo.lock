@@ -3725,6 +3725,7 @@ dependencies = [
 name = "tla-registry"
 version = "0.1.0"
 dependencies = [
+ "hos-common",
  "near-sdk",
 ]
 

@@ -1,4 +1,13 @@
+use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{CurveType, PublicKey};
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(crate = "near_sdk::serde")]
+pub enum MintOutcome {
+    CreationFailed,
+    Active,
+    SignerPending,
+}
 
 pub fn ed25519_base58(key: &PublicKey) -> Option<String> {
     if key.curve_type() != CurveType::ED25519 {

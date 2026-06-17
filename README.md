@@ -12,13 +12,29 @@ of House of Stake singleton extensions, never by a raw FullAccess key.
 | `tla-registry` | Marketplace orchestrator: TLA records, sub-account rentals, resale listings, fee tiers, FT allowlist, and refund accounting. |
 | `tla-manager` | Per-TLA mint primitive. Creates the sub-account, deploys the wallet contract, and installs the extensions in one promise chain. |
 | `active-signer` | Per-wallet signing authority (ed25519). Holds the owner key and nonce, executes signed requests against the wallet, and gates owner swap and freeze. |
-| `hos-extension` | Marketplace authority. Registry-gated `force_transfer`, `sweep_ft`, and `reclaim_and_delete`. |
-| `mpc-recovery` | Opt-in account recovery. Timelocked and attestation-verified, ending in an `active-signer` owner swap guarded by a compare-and-swap. |
+| `hos-extension` | Marketplace authority. Registry-gated `force_transfer` and `sweep_ft`; sub-account reclaim is registry-side via `park_wallet`. |
+| `mpc-recovery` | Opt-in account recovery. Timelocked and watcher-quorum-verified, with two target modes: wallet (ends in an `active-signer` owner swap guarded by a compare-and-swap) and native (MPC `AddKey` on a raw NEAR account via `v1.signer`). See [THREAT_MODEL.md](THREAT_MODEL.md). |
 | `hos-wallet` | Vendored fork of the Defuse `wallet-no-sign` contract. The signing path always rejects; all authority flows through the extensions. Carries its own README and LICENSE. |
 
 `dev-contracts/test-ft` is a minimal fungible token used only by the integration
 tests. `crates/hos-common` holds pure helpers shared across the contracts.
 `integration/` holds the near-workspaces sandbox suite.
+
+## Recovery
+
+`mpc-recovery` is opt-in per account and supports two target modes, fixed at policy
+install:
+
+- **Wallet** (default for managed sub-accounts): recovery rotates the
+  `active-signer` owner key via `swap_owner`, guarded by a compare-and-swap on the
+  current owner and serialized against sales by a freeze flag.
+- **Native**: recovery adds a FullAccess key to a raw NEAR account via an `AddKey`
+  transaction signed by NEAR Chain Signatures (`v1.signer`). This grants
+  protocol-level control and depends on the MPC signer's availability.
+
+Both modes require a watcher-quorum verdict after a per-policy timelock. The
+security model and the Native-specific trust assumptions are in
+[THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## Build
 

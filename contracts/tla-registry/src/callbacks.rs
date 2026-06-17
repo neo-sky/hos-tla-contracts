@@ -2,49 +2,64 @@ use crate::error::ContractError;
 use crate::events::Event;
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
+use hos_common::MintOutcome;
 use near_sdk::json_types::U128;
-use near_sdk::{is_promise_success, near, AccountId, FunctionError};
+use near_sdk::{is_promise_success, near, AccountId, FunctionError, PromiseError, PublicKey};
 
 #[near]
 impl TlaRegistry {
+    #[allow(clippy::too_many_arguments)]
     #[private]
     pub fn on_sub_account_created(
         &mut self,
         tla_id: AccountId,
         name: String,
         payer: AccountId,
+        owner_key: PublicKey,
         rent_yocto: U128,
         attached_yocto: U128,
+        #[callback_result] outcome: Result<MintOutcome, PromiseError>,
     ) {
         let key = sub_account_key(&tla_id, &name);
-        if !is_promise_success() {
-            self.settle_failed_mint(
-                &key,
-                &tla_id,
-                &payer,
-                attached_yocto,
-                "sub-account creation failed",
-            );
-            return;
+        match outcome {
+            Ok(MintOutcome::Active) => {
+                let expires_at = self.record_rental(&key, &payer, rent_yocto, attached_yocto);
+                Event::SubAccountRented {
+                    full_name: key,
+                    tla_id,
+                    owner: payer,
+                    rent_yocto,
+                    expires_at,
+                }
+                .emit();
+            }
+            Ok(MintOutcome::SignerPending) => {
+                let expires_at = self.record_rental(&key, &payer, rent_yocto, attached_yocto);
+                self.signer_pending.insert(key.clone(), owner_key);
+                Event::SubAccountRented {
+                    full_name: key.clone(),
+                    tla_id,
+                    owner: payer.clone(),
+                    rent_yocto,
+                    expires_at,
+                }
+                .emit();
+                Event::SubAccountSignerPending {
+                    full_name: key,
+                    owner: payer,
+                }
+                .emit();
+            }
+            Ok(MintOutcome::CreationFailed) | Err(_) => {
+                self.settle_failed_mint(
+                    &key,
+                    &tla_id,
+                    &payer,
+                    attached_yocto,
+                    "sub-account creation failed",
+                );
+            }
         }
-        self.sub_account_count = self.sub_account_count.saturating_add(1);
-        self.total_revenue = self.total_revenue.saturating_add(rent_yocto.0);
-        let charged = rent_yocto
-            .0
-            .saturating_add(self.fee_config.account_creation_deposit.0);
-        self.refund_excess(&payer, attached_yocto.0, charged);
-        let sub = match self.sub_accounts.get(&key) {
-            Some(s) => s,
-            None => ContractError::SubAccountNotFound.panic(),
-        };
-        Event::SubAccountRented {
-            full_name: key.clone(),
-            tla_id: tla_id.clone(),
-            owner: payer.clone(),
-            rent_yocto,
-            expires_at: sub.expires_at,
-        }
-        .emit();
     }
 
     #[private]
@@ -87,6 +102,25 @@ impl TlaRegistry {
 }
 
 impl TlaRegistry {
+    fn record_rental(
+        &mut self,
+        key: &str,
+        payer: &AccountId,
+        rent_yocto: U128,
+        attached_yocto: U128,
+    ) -> u64 {
+        self.sub_account_count = self.sub_account_count.saturating_add(1);
+        self.total_revenue = self.total_revenue.saturating_add(rent_yocto.0);
+        let charged = rent_yocto
+            .0
+            .saturating_add(self.fee_config.account_creation_deposit.0);
+        self.refund_excess(payer, attached_yocto.0, charged);
+        match self.sub_accounts.get(key) {
+            Some(s) => s.expires_at,
+            None => ContractError::SubAccountNotFound.panic(),
+        }
+    }
+
     fn settle_failed_mint(
         &mut self,
         key: &str,

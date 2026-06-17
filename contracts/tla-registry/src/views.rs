@@ -83,6 +83,11 @@ impl TlaRegistry {
         !self.sub_accounts.contains_key(&key)
     }
 
+    pub fn is_signer_pending(&self, tla_id: AccountId, name: String) -> bool {
+        let key = sub_account_key(&tla_id, &name);
+        self.signer_pending.contains_key(&key)
+    }
+
     pub fn list_tlas(&self, from_index: u64, limit: u64) -> Vec<TlaView> {
         self.tlas
             .iter()

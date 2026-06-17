@@ -1,9 +1,10 @@
 use crate::error::ContractError;
 use crate::types::*;
 use crate::{fees, TlaRegistry};
+use hos_common::MintOutcome;
 use near_sdk::json_types::{U128, U64};
 use near_sdk::test_utils::VMContextBuilder;
-use near_sdk::{testing_env, AccountId, NearToken, PublicKey};
+use near_sdk::{testing_env, AccountId, NearToken, PromiseError, PublicKey};
 use std::str::FromStr;
 
 const ADMIN: &str = "hos.testnet";
@@ -75,8 +76,10 @@ fn rent_alice_sub(c: &mut TlaRegistry, name: &str) {
         acc(TLA),
         name.to_string(),
         acc(ALICE),
+        parked_key(),
         U128(total - c.get_fee_config().account_creation_deposit.0),
         U128(total),
+        Ok(MintOutcome::Active),
     );
 }
 
@@ -273,8 +276,10 @@ mod rental {
             acc(TLA),
             "alice".to_string(),
             acc(ALICE),
+            parked_key(),
             U128(total - c.get_fee_config().account_creation_deposit.0),
             U128(total),
+            Err(PromiseError::Failed),
         );
         assert_eq!(c.get_pending_refund(acc(ALICE)).0, total);
         assert!(c.is_name_available(acc(TLA), "alice".to_string()));
@@ -344,6 +349,98 @@ mod rental {
                 .main_wallet,
             acc(BOB)
         );
+    }
+
+    fn rent_alice_sub_pending(c: &mut TlaRegistry, name: &str) {
+        let total = rent_total(c, name);
+        ctx(ALICE, total, 1);
+        let _ = c
+            .rent_sub_account(acc(TLA), name.to_string(), parked_key(), acc(ALICE))
+            .unwrap();
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_sub_account_created(
+            acc(TLA),
+            name.to_string(),
+            acc(ALICE),
+            parked_key(),
+            U128(total - c.get_fee_config().account_creation_deposit.0),
+            U128(total),
+            Ok(MintOutcome::SignerPending),
+        );
+    }
+
+    #[test]
+    fn signer_pending_keeps_name_and_records_sub() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub_pending(&mut c, "alice");
+        assert!(!c.is_name_available(acc(TLA), "alice".to_string()));
+        assert!(c.is_signer_pending(acc(TLA), "alice".to_string()));
+        assert_eq!(c.get_stats().sub_account_count, 1);
+        assert_eq!(
+            c.get_sub_account(acc(TLA), "alice".to_string())
+                .unwrap()
+                .owner,
+            acc(ALICE)
+        );
+    }
+
+    #[test]
+    fn signer_pending_sub_not_sellable() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub_pending(&mut c, "alice");
+        ctx(ALICE, 1, 2);
+        assert!(matches!(
+            c.list_sub_account(acc(TLA), "alice".to_string(), U128(10)),
+            Err(ContractError::SubAccountNotSellable)
+        ));
+    }
+
+    #[test]
+    fn retry_signer_install_clears_pending_on_success() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub_pending(&mut c, "alice");
+        ctx(ALICE, 0, 2);
+        let _ = c
+            .retry_signer_install(acc(TLA), "alice".to_string())
+            .unwrap();
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_retry_signer_settled(format!("alice.{TLA}"));
+        assert!(!c.is_signer_pending(acc(TLA), "alice".to_string()));
+    }
+
+    #[test]
+    fn retry_signer_install_failure_leaves_pending() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub_pending(&mut c, "alice");
+        ctx(ALICE, 0, 2);
+        let _ = c
+            .retry_signer_install(acc(TLA), "alice".to_string())
+            .unwrap();
+        ctx_callback(near_sdk::PromiseResult::Failed);
+        c.on_retry_signer_settled(format!("alice.{TLA}"));
+        assert!(c.is_signer_pending(acc(TLA), "alice".to_string()));
+    }
+
+    #[test]
+    fn retry_signer_install_rejects_non_owner() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub_pending(&mut c, "alice");
+        ctx(BOB, 0, 2);
+        assert!(matches!(
+            c.retry_signer_install(acc(TLA), "alice".to_string()),
+            Err(ContractError::OnlyOwner)
+        ));
+    }
+
+    #[test]
+    fn retry_signer_install_rejects_when_not_pending() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(ALICE, 0, 2);
+        assert!(matches!(
+            c.retry_signer_install(acc(TLA), "alice".to_string()),
+            Err(ContractError::SignerNotPending)
+        ));
     }
 }
 
@@ -672,6 +769,25 @@ mod business {
         c
     }
 
+    fn rent_business_sub(c: &mut TlaRegistry, name: &str) {
+        let total = c.get_fee_config().sub_fee_per_account.0
+            + c.get_fee_config().account_creation_deposit.0;
+        ctx(ALICE, total, 1);
+        let _ = c
+            .rent_sub_account(acc(TLA), name.to_string(), parked_key(), acc(ALICE))
+            .unwrap();
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_sub_account_created(
+            acc(TLA),
+            name.to_string(),
+            acc(ALICE),
+            parked_key(),
+            U128(c.get_fee_config().sub_fee_per_account.0),
+            U128(total),
+            Ok(MintOutcome::Active),
+        );
+    }
+
     #[test]
     fn only_licensee_rents_business_subs() {
         let mut c = deploy_with_business_tla();
@@ -712,8 +828,10 @@ mod business {
             acc(TLA),
             "staff".to_string(),
             acc(ALICE),
+            parked_key(),
             U128(c.get_fee_config().sub_fee_per_account.0),
             U128(total),
+            Ok(MintOutcome::Active),
         );
         ctx(ALICE, 1, 2);
         c.schedule_retraction(acc(TLA), "staff".to_string())
@@ -722,6 +840,39 @@ mod business {
         ctx(ALICE, 1, 3);
         c.cancel_retraction(acc(TLA), "staff".to_string()).unwrap();
         assert!(c.get_retraction_at(acc(TLA), "staff".to_string()).is_none());
+    }
+
+    #[test]
+    fn business_sub_cannot_be_listed() {
+        let mut c = deploy_with_business_tla();
+        rent_business_sub(&mut c, "staff");
+        ctx(ALICE, 1, 2);
+        assert!(matches!(
+            c.list_sub_account(acc(TLA), "staff".to_string(), U128(10)),
+            Err(ContractError::BusinessSubNotResellable)
+        ));
+    }
+
+    #[test]
+    fn business_sub_cannot_be_bought() {
+        let mut c = deploy_with_business_tla();
+        rent_business_sub(&mut c, "staff");
+        ctx(BOB, 10, 2);
+        assert!(matches!(
+            c.buy_sub_account(acc(TLA), "staff".to_string(), parked_key()),
+            Err(ContractError::BusinessSubNotResellable)
+        ));
+    }
+
+    #[test]
+    fn business_sub_offer_cannot_be_accepted() {
+        let mut c = deploy_with_business_tla();
+        rent_business_sub(&mut c, "staff");
+        ctx(ALICE, 1, 2);
+        assert!(matches!(
+            c.accept_offer(acc(TLA), "staff".to_string(), acc(BOB), U128(10)),
+            Err(ContractError::BusinessSubNotResellable)
+        ));
     }
 }
 

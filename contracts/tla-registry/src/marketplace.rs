@@ -321,6 +321,9 @@ impl TlaRegistry {
         {
             return Err(ContractError::SubAccountIsMother);
         }
+        if self.signer_pending.contains_key(key) {
+            return Err(ContractError::SubAccountNotSellable);
+        }
         let sub = self
             .sub_accounts
             .get(key)
@@ -329,6 +332,9 @@ impl TlaRegistry {
             return Err(ContractError::RetractionPending);
         }
         let tla = self.tlas.get(tla_id).ok_or(ContractError::TlaNotFound)?;
+        if tla.tla_type == TlaType::Business {
+            return Err(ContractError::BusinessSubNotResellable);
+        }
         if tla.status != TlaStatus::Active {
             return Err(ContractError::SubAccountNotSellable);
         }

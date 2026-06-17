@@ -598,3 +598,80 @@ fn transfer_rejects_non_authority() {
     ctx("attacker.testnet", 0, 1);
     c.on_wallet_transferred(account_id());
 }
+
+fn approve_native_recovery(
+    c: &mut MpcRecovery,
+    mother: &SigningKey,
+    w1: &SigningKey,
+    wk1: PublicKey,
+) -> PublicKey {
+    let (_, new_owner) = keypair();
+    ctx("anyone.testnet", 1, 1);
+    c.request_recovery(
+        account_id(),
+        new_owner.clone(),
+        U64(0),
+        attest(mother, &new_owner, 0),
+    );
+    ctx("anyone.testnet", 61 * NS_PER_SEC, 5);
+    let _ = c.submit_verdict(account_id(), true, watcher_sigs(&[w1], &[wk1], 0, true));
+    new_owner
+}
+
+#[test]
+fn native_finalize_signs_and_resolves() {
+    let (w1, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1.clone()], 1);
+    install(&mut c, mother_pk);
+    approve_native_recovery(&mut c, &mother, &w1, wk1);
+    assert!(matches!(
+        c.accounts.get(&account_id()).unwrap().phase,
+        Phase::Approved { .. }
+    ));
+    ctx("anyone.testnet", 61 * NS_PER_SEC, 6);
+    let _ = c.finalize_recovery(account_id(), U64(1), block_hash());
+    assert!(matches!(
+        c.accounts.get(&account_id()).unwrap().phase,
+        Phase::Resolving { .. }
+    ));
+}
+
+#[test]
+fn native_on_signed_success_resolves_to_idle() {
+    let (w1, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1.clone()], 1);
+    install(&mut c, mother_pk);
+    approve_native_recovery(&mut c, &mother, &w1, wk1);
+    ctx("anyone.testnet", 61 * NS_PER_SEC, 6);
+    let _ = c.finalize_recovery(account_id(), U64(1), block_hash());
+    let out = c.on_signed(
+        account_id(),
+        0,
+        "ab".to_string(),
+        Ok(json!({"signature": "stub"})),
+    );
+    assert!(out.is_some());
+    assert!(matches!(
+        c.accounts.get(&account_id()).unwrap().phase,
+        Phase::Idle
+    ));
+}
+
+#[test]
+fn native_on_signed_failure_restores_approved() {
+    let (w1, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1.clone()], 1);
+    install(&mut c, mother_pk);
+    approve_native_recovery(&mut c, &mother, &w1, wk1);
+    ctx("anyone.testnet", 61 * NS_PER_SEC, 6);
+    let _ = c.finalize_recovery(account_id(), U64(1), block_hash());
+    let out = c.on_signed(account_id(), 0, "ab".to_string(), Err(PromiseError::Failed));
+    assert!(out.is_none());
+    assert!(matches!(
+        c.accounts.get(&account_id()).unwrap().phase,
+        Phase::Approved { .. }
+    ));
+}

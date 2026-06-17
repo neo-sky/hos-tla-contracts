@@ -6,4 +6,6 @@ pub enum Event {
     SubAccountMinted { account: AccountId, owner: String },
     #[event_version("1.0.0")]
     MintFailed { account: AccountId },
+    #[event_version("1.0.0")]
+    SignerInstallFailed { account: AccountId },
 }

@@ -5,11 +5,12 @@ use crate::interfaces::{ext_hos_extension, ext_tla_manager};
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
 use near_sdk::json_types::U128;
-use near_sdk::{env, near, AccountId, Gas, NearToken, Promise, PublicKey};
+use near_sdk::{env, is_promise_success, near, AccountId, Gas, NearToken, Promise, PublicKey};
 
-const GAS_FOR_CREATE: Gas = Gas::from_tgas(30);
+const GAS_FOR_CREATE: Gas = Gas::from_tgas(90);
 const GAS_FOR_CALLBACK: Gas = Gas::from_tgas(15);
 const GAS_FOR_RERENT_FORCE: Gas = Gas::from_tgas(20);
+const GAS_FOR_RETRY_INSTALL: Gas = Gas::from_tgas(20);
 
 #[near]
 impl TlaRegistry {
@@ -156,7 +157,7 @@ impl TlaRegistry {
             Ok(ext_tla_manager::ext(tla_id.clone())
                 .with_attached_deposit(creation_deposit)
                 .with_static_gas(GAS_FOR_CREATE)
-                .create_sub_account(name.clone(), owner_key)
+                .create_sub_account(name.clone(), owner_key.clone())
                 .then(
                     Self::ext(env::current_account_id())
                         .with_static_gas(GAS_FOR_CALLBACK)
@@ -164,6 +165,7 @@ impl TlaRegistry {
                             tla_id,
                             name,
                             caller,
+                            owner_key,
                             U128(rent),
                             U128(attached.as_yoctonear()),
                         ),
@@ -322,5 +324,47 @@ impl TlaRegistry {
         }
         .emit();
         Ok(())
+    }
+
+    #[handle_result]
+    pub fn retry_signer_install(
+        &mut self,
+        tla_id: AccountId,
+        name: String,
+    ) -> Result<Promise, ContractError> {
+        self.assert_not_paused()?;
+        let key = sub_account_key(&tla_id, &name);
+        let owner_key = self
+            .signer_pending
+            .get(&key)
+            .cloned()
+            .ok_or(ContractError::SignerNotPending)?;
+        let sub = self
+            .sub_accounts
+            .get(&key)
+            .ok_or(ContractError::SubAccountNotFound)?;
+        if env::predecessor_account_id() != sub.owner {
+            return Err(ContractError::OnlyOwner);
+        }
+        let sub_account: AccountId = key
+            .parse()
+            .map_err(|_| ContractError::InvalidSubAccountId)?;
+        Ok(ext_tla_manager::ext(tla_id)
+            .with_static_gas(GAS_FOR_RETRY_INSTALL)
+            .retry_install(sub_account, owner_key)
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_CALLBACK)
+                    .on_retry_signer_settled(key),
+            ))
+    }
+
+    #[private]
+    pub fn on_retry_signer_settled(&mut self, key: String) {
+        if !is_promise_success() {
+            return;
+        }
+        self.signer_pending.remove(&key);
+        Event::SignerInstalled { full_name: key }.emit();
     }
 }

@@ -194,4 +194,8 @@ pub enum Event {
     },
     #[event_version("1.0.0")]
     SubAccountRetractionCanceled { full_name: String, by: AccountId },
+    #[event_version("1.0.0")]
+    SubAccountSignerPending { full_name: String, owner: AccountId },
+    #[event_version("1.0.0")]
+    SignerInstalled { full_name: String },
 }
