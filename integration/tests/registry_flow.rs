@@ -1,0 +1,394 @@
+use std::str::FromStr;
+use std::time::Duration;
+
+use anyhow::Result;
+use defuse_wallet::signature::{Deadline, RequestMessage};
+use defuse_wallet::{PromiseSingle, Request};
+use defuse_wallet_sdk::ed25519::ed25519_dalek::SigningKey;
+use defuse_wallet_sdk::Signer as WalletSigner;
+use near_crypto::{InMemorySigner, SecretKey as NcSecretKey};
+use near_jsonrpc_client::{methods, JsonRpcClient};
+use near_jsonrpc_primitives::types::query::QueryResponseKind;
+use near_primitives::action::{Action, DeployGlobalContractAction, GlobalContractDeployMode};
+use near_primitives::transaction::SignedTransaction;
+use near_primitives::types::BlockReference;
+use near_primitives::views::{FinalExecutionStatus, QueryRequest};
+use near_workspaces::types::{Gas, KeyType, NearToken, PublicKey};
+use near_workspaces::{Account, AccountId, Contract, Worker};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+
+const ACTIVE_SIGNER_WASM: &str = "../target/near/active_signer/active_signer.wasm";
+const HOS_EXTENSION_WASM: &str = "../target/near/hos_extension/hos_extension.wasm";
+const HOS_WALLET_WASM: &str = "../target/near/hos_wallet/hos_wallet.wasm";
+const TLA_MANAGER_WASM: &str = "../target/near/tla_manager/tla_manager.wasm";
+const TLA_REGISTRY_WASM: &str = "../target/near/tla_registry/tla_registry.wasm";
+
+const TIMEOUT_SECS: u32 = 3600;
+const GRACE_NS: u64 = 30 * 24 * 60 * 60 * 1_000_000_000;
+
+fn user_key(seed: u8) -> SigningKey {
+    SigningKey::from_bytes(&[seed; 32])
+}
+
+fn raw_base58(key: &SigningKey) -> String {
+    WalletSigner::public_key(key).to_string()
+}
+
+fn ws_pubkey(key: &SigningKey) -> PublicKey {
+    PublicKey::try_from_parts(KeyType::ED25519, key.verifying_key().as_bytes())
+        .expect("valid ed25519 public key")
+}
+
+async fn deploy_at(root: &Account, name: &str, balance: u128, wasm: &str) -> Result<Contract> {
+    let account = root
+        .create_subaccount(name)
+        .initial_balance(NearToken::from_near(balance))
+        .transact()
+        .await?
+        .into_result()?;
+    let bytes = std::fs::read(wasm)?;
+    Ok(account.deploy(&bytes).await?.into_result()?)
+}
+
+async fn deploy_wallet_global(
+    worker: &Worker<near_workspaces::network::Sandbox>,
+    deployer: &Account,
+) -> Result<[u8; 32]> {
+    let wasm = std::fs::read(HOS_WALLET_WASM)?;
+    let client = JsonRpcClient::connect(worker.rpc_addr());
+    let secret_key = NcSecretKey::from_str(&deployer.secret_key().to_string())?;
+    let account_id: near_primitives::types::AccountId = deployer.id().as_str().parse()?;
+    let public_key = secret_key.public_key();
+
+    let access = client
+        .call(methods::query::RpcQueryRequest {
+            block_reference: BlockReference::latest(),
+            request: QueryRequest::ViewAccessKey {
+                account_id: account_id.clone(),
+                public_key: public_key.clone(),
+            },
+        })
+        .await?;
+    let (nonce, block_hash) = match access.kind {
+        QueryResponseKind::AccessKey(ak) => (ak.nonce, access.block_hash),
+        _ => anyhow::bail!("unexpected query response for access key"),
+    };
+
+    let signer: near_crypto::Signer =
+        InMemorySigner::from_secret_key(account_id.clone(), secret_key);
+    let action = Action::DeployGlobalContract(DeployGlobalContractAction {
+        code: wasm.clone().into(),
+        deploy_mode: GlobalContractDeployMode::CodeHash,
+    });
+    let signed = SignedTransaction::from_actions(
+        nonce + 1,
+        account_id.clone(),
+        account_id,
+        &signer,
+        vec![action],
+        block_hash,
+        0,
+    );
+    let outcome = client
+        .call(methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest {
+            signed_transaction: signed,
+        })
+        .await?;
+    match outcome.status {
+        FinalExecutionStatus::SuccessValue(_) => {}
+        other => anyhow::bail!("global contract deploy failed: {other:?}"),
+    }
+    Ok(Sha256::digest(&wasm).into())
+}
+
+fn signed_transfer(
+    wallet: &AccountId,
+    recipient: &AccountId,
+    amount: NearToken,
+    nonce: u32,
+    key: &SigningKey,
+) -> (serde_json::Value, String) {
+    let signer_id = near_sdk::AccountId::from_str(wallet.as_str()).unwrap();
+    let recipient = near_sdk::AccountId::from_str(recipient.as_str()).unwrap();
+    let out = PromiseSingle::new(recipient)
+        .transfer(near_sdk::NearToken::from_yoctonear(amount.as_yoctonear()));
+    let msg = RequestMessage {
+        chain_id: "mainnet".to_string(),
+        signer_id,
+        nonce,
+        created_at: Deadline::now() - Duration::from_secs(60),
+        timeout: Duration::from_secs(TIMEOUT_SECS as u64),
+        request: Request::new().out(out),
+    };
+    let proof = WalletSigner::sign(key, &msg).unwrap();
+    (serde_json::to_value(&msg).unwrap(), proof)
+}
+
+#[tokio::test]
+async fn full_registry_mint_flow() -> Result<()> {
+    let worker = near_workspaces::sandbox().await?;
+    let root = worker.root_account()?;
+
+    let admin = root
+        .create_subaccount("admin")
+        .initial_balance(NearToken::from_near(50))
+        .transact()
+        .await?
+        .into_result()?;
+    let recovery = root
+        .create_subaccount("recovery")
+        .initial_balance(NearToken::from_near(10))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let active_signer = deploy_at(&root, "asigner", 30, ACTIVE_SIGNER_WASM).await?;
+    let hos_extension = deploy_at(&root, "hosext", 30, HOS_EXTENSION_WASM).await?;
+    let registry = deploy_at(&root, "registry", 50, TLA_REGISTRY_WASM).await?;
+
+    active_signer
+        .call("new")
+        .args_json(json!({
+            "admin": admin.id(),
+            "marketplace_authority": hos_extension.id(),
+            "recovery_authority": recovery.id(),
+            "timeout_secs": TIMEOUT_SECS,
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+    hos_extension
+        .call("new")
+        .args_json(json!({
+            "admin": admin.id(),
+            "registry": registry.id(),
+            "active_signer": active_signer.id(),
+            "recovery": recovery.id(),
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+    registry
+        .call("new")
+        .args_json(json!({
+            "admin": admin.id(),
+            "hos_extension": hos_extension.id(),
+            "parked_signer_pubkey": ws_pubkey(&user_key(99)),
+            "grace_period_ns": GRACE_NS.to_string(),
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let deployer = root
+        .create_subaccount("deployer")
+        .initial_balance(NearToken::from_near(50))
+        .transact()
+        .await?
+        .into_result()?;
+    let wallet_hash = deploy_wallet_global(&worker, &deployer).await?;
+
+    let tla = root
+        .create_subaccount("mytla")
+        .initial_balance(NearToken::from_near(100))
+        .transact()
+        .await?
+        .into_result()?;
+    let manager_wasm = std::fs::read(TLA_MANAGER_WASM)?;
+    let manager = tla.deploy(&manager_wasm).await?.into_result()?;
+    manager
+        .call("new")
+        .args_json(json!({
+            "registry": registry.id(),
+            "active_signer": active_signer.id(),
+            "hos_extension": hos_extension.id(),
+            "wallet_code_hash": bs58::encode(wallet_hash).into_string(),
+            "min_balance": NearToken::from_near(2),
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    admin
+        .call(active_signer.id(), "add_minter")
+        .args_json(json!({ "minter": tla.id() }))
+        .transact()
+        .await?
+        .into_result()?;
+    admin
+        .call(registry.id(), "register_tla")
+        .args_json(json!({
+            "tla_id": tla.id(),
+            "tla_type": "Open",
+            "premium_category": "Standard",
+            "licensee": null,
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+    admin
+        .call(registry.id(), "activate_open_tla")
+        .args_json(json!({ "tla_id": tla.id() }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let renter = root
+        .create_subaccount("renter")
+        .initial_balance(NearToken::from_near(50))
+        .transact()
+        .await?
+        .into_result()?;
+    let owner = user_key(7);
+
+    let rent = renter
+        .call(registry.id(), "rent_sub_account")
+        .args_json(json!({
+            "tla_id": tla.id(),
+            "name": "alice",
+            "owner_key": ws_pubkey(&owner),
+            "main_wallet": renter.id(),
+        }))
+        .deposit(NearToken::from_near(10))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(rent.is_success(), "rent_sub_account failed: {rent:#?}");
+
+    let wallet_id: AccountId = format!("alice.{}", tla.id()).parse()?;
+    let signer_of: Option<String> = active_signer
+        .view("signer_of")
+        .args_json(json!({ "wallet": wallet_id }))
+        .await?
+        .json()?;
+    assert_eq!(
+        signer_of.as_deref(),
+        Some(raw_base58(&owner).as_str()),
+        "minted wallet should have the owner installed on active-signer"
+    );
+
+    let recipient = root
+        .create_subaccount("recipient")
+        .initial_balance(NearToken::from_near(1))
+        .transact()
+        .await?
+        .into_result()?;
+    let before = recipient.view_account().await?.balance;
+    let (msg, proof) = signed_transfer(
+        &wallet_id,
+        recipient.id(),
+        NearToken::from_near(1),
+        1,
+        &owner,
+    );
+    let exec = renter
+        .call(active_signer.id(), "submit_signed_request")
+        .args_json(json!({ "wallet": wallet_id, "msg": msg, "proof": proof }))
+        .deposit(NearToken::from_yoctonear(1))
+        .gas(Gas::from_tgas(120))
+        .transact()
+        .await?;
+    assert!(
+        exec.is_success(),
+        "minted wallet should execute a signed request: {exec:#?}"
+    );
+    let after = recipient.view_account().await?.balance;
+    assert!(
+        after.as_yoctonear() > before.as_yoctonear(),
+        "minted wallet should transfer to recipient"
+    );
+
+    let mut fee_config: serde_json::Value = registry.view("get_fee_config").await?.json()?;
+    fee_config["resale_commission_bps"] = json!(500);
+    admin
+        .call(registry.id(), "update_fee_config")
+        .args_json(json!({ "config": fee_config }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let revenue_before = registry_total_revenue(&registry).await?;
+    let seller_refund_before = pending_refund(&registry, renter.id()).await?;
+
+    renter
+        .call(registry.id(), "list_sub_account")
+        .args_json(json!({
+            "tla_id": tla.id(),
+            "name": "alice",
+            "price": NearToken::from_near(10).as_yoctonear().to_string(),
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let buyer = root
+        .create_subaccount("buyer")
+        .initial_balance(NearToken::from_near(50))
+        .transact()
+        .await?
+        .into_result()?;
+    let buyer_key = user_key(8);
+    buyer
+        .call(registry.id(), "buy_sub_account")
+        .args_json(json!({
+            "tla_id": tla.id(),
+            "name": "alice",
+            "new_owner_key": ws_pubkey(&buyer_key),
+        }))
+        .deposit(NearToken::from_near(12))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let price = NearToken::from_near(10).as_yoctonear();
+    let deposit = NearToken::from_near(12).as_yoctonear();
+    let commission = price * 500 / 10_000;
+    let seller_proceeds = price - commission;
+    let buyer_excess = deposit - price;
+
+    let seller_delta = pending_refund(&registry, renter.id()).await? - seller_refund_before;
+    let buyer_refund = pending_refund(&registry, buyer.id()).await?;
+    let revenue_delta = registry_total_revenue(&registry).await? - revenue_before;
+
+    assert_eq!(
+        seller_delta, seller_proceeds,
+        "seller credited price minus commission"
+    );
+    assert_eq!(buyer_refund, buyer_excess, "buyer refunded the overpayment");
+    assert_eq!(revenue_delta, commission, "commission booked to revenue");
+    assert_eq!(
+        seller_delta + buyer_refund + revenue_delta,
+        deposit,
+        "every yocto of the buyer deposit must be accounted for"
+    );
+
+    let new_owner: Option<String> = active_signer
+        .view("signer_of")
+        .args_json(json!({ "wallet": wallet_id }))
+        .await?
+        .json()?;
+    assert_eq!(
+        new_owner.as_deref(),
+        Some(raw_base58(&buyer_key).as_str()),
+        "buyer controls the wallet after sale"
+    );
+
+    Ok(())
+}
+
+async fn pending_refund(registry: &Contract, account: &AccountId) -> Result<u128> {
+    let v: near_sdk::json_types::U128 = registry
+        .view("get_pending_refund")
+        .args_json(json!({ "account_id": account }))
+        .await?
+        .json()?;
+    Ok(v.0)
+}
+
+async fn registry_total_revenue(registry: &Contract) -> Result<u128> {
+    let stats: serde_json::Value = registry.view("get_stats").await?.json()?;
+    Ok(stats["total_revenue_yocto"].as_str().unwrap().parse()?)
+}

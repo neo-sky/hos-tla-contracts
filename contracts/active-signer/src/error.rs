@@ -1,0 +1,16 @@
+pub const ONLY_ADMIN: &str = "only admin";
+pub const ONLY_MINTER: &str = "only minter";
+pub const WALLET_NOT_UNDER_MINTER: &str = "wallet is not a sub-account of the minter";
+pub const LAST_ADMIN: &str = "cannot remove last admin";
+pub const ONLY_RECOVERY: &str = "only recovery authority";
+pub const NO_SIGNER: &str = "no signer for wallet";
+pub const DEPOSIT_REQUIRED: &str = "non-zero deposit required";
+pub const SIGNER_MISMATCH: &str = "signer_id does not match wallet";
+pub const WRONG_CHAIN: &str = "wrong chain id";
+pub const FROZEN: &str = "wallet frozen by recovery";
+pub const NOT_FROZEN: &str = "wallet not frozen";
+pub const OWNER_CHANGED: &str = "wallet owner changed since recovery was anchored";
+pub const BAD_SIGNATURE: &str = "invalid signature";
+pub const NONCE_REJECTED: &str = "nonce already used or expired";
+pub const UNAUTHORIZED: &str = "unauthorized";
+pub const BAD_KEY: &str = "invalid ed25519 public key";

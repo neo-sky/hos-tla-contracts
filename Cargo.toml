@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "contracts/mpc-recovery",
+    "contracts/active-signer",
+    "contracts/hos-extension",
+    "contracts/hos-wallet",
+    "contracts/tla-manager",
+    "contracts/tla-registry",
+    "dev-contracts/test-ft",
+]
+exclude = ["integration"]
+
+[workspace.dependencies]
+near-sdk = { version = "=5.26.1" }
+
+[profile.release]
+codegen-units = 1
+opt-level = "z"
+lto = true
+panic = "abort"
+overflow-checks = true

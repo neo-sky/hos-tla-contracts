@@ -1,0 +1,23 @@
+[package]
+name = "hos-tla-integration"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+publish = false
+
+[workspace]
+
+[dev-dependencies]
+near-workspaces = "=0.22.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde_json = "1"
+anyhow = "1"
+near-sdk = "=5.26.1"
+near-primitives = { version = "0.34", features = ["test_utils"] }
+near-crypto = "0.34"
+near-jsonrpc-client = "0.20"
+near-jsonrpc-primitives = "0.34"
+sha2 = "0.10"
+bs58 = "0.5"
+defuse-wallet = { git = "https://github.com/near/intents", rev = "980c19e8b2d6ca864e01a3c2b5a9a12dd1d19683", default-features = false, features = ["ed25519"] }
+defuse-wallet-sdk = { git = "https://github.com/near/intents", rev = "980c19e8b2d6ca864e01a3c2b5a9a12dd1d19683", default-features = false, features = ["ed25519"] }

@@ -1,0 +1,14 @@
+pub const ONLY_OWNER: &str = "only owner";
+pub const ONLY_TRANSFER_AUTHORITY: &str = "only transfer authority";
+pub const BAD_THRESHOLD: &str = "threshold must be in 1..=watchers";
+pub const NO_POLICY: &str = "no recovery policy for account";
+pub const NOT_IDLE: &str = "recovery already in progress";
+pub const NOT_REQUESTED: &str = "no recovery requested";
+pub const NOT_APPROVED: &str = "recovery not approved";
+pub const NOT_ACTIVE: &str = "no abortable recovery in progress";
+pub const STALE_ROUND: &str = "stale or invalid round";
+pub const BAD_ATTESTATION: &str = "invalid attestation signature";
+pub const TIMELOCK: &str = "timelock not elapsed";
+pub const NO_QUORUM: &str = "watcher quorum not met";
+pub const BAD_SIGNATURE_LEN: &str = "signature must be 64 bytes";
+pub const NOT_ED25519: &str = "owner key must be ed25519";

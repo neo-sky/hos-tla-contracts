@@ -1,0 +1,66 @@
+[package]
+name = "hos-wallet"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+repository = "https://github.com/neo-sky/hos-tla-contracts"
+license = "MIT"
+description = "House of Stake wallet: a pinned fork of the Defuse wallet-no-sign contract (near/intents, MIT) with an added once-only init for named-account deployment."
+readme = "../README.md"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+defuse-bitmap = { git = "https://github.com/near/intents", rev = "980c19e8b2d6ca864e01a3c2b5a9a12dd1d19683", features = ["borsh"] }
+defuse-borsh-utils = { git = "https://github.com/near/intents", rev = "980c19e8b2d6ca864e01a3c2b5a9a12dd1d19683" }
+defuse-deadline = { git = "https://github.com/near/intents", rev = "980c19e8b2d6ca864e01a3c2b5a9a12dd1d19683", features = ["borsh", "serde"] }
+defuse-serde-utils = { git = "https://github.com/near/intents", rev = "980c19e8b2d6ca864e01a3c2b5a9a12dd1d19683", features = ["base58"] }
+
+derive_more = { version = "2.1", features = ["from"] }
+near-sdk = { workspace = true, features = ["deterministic-account-ids"] }
+thiserror = "2"
+
+defuse-crypto = { git = "https://github.com/near/intents", rev = "980c19e8b2d6ca864e01a3c2b5a9a12dd1d19683", default-features = false, features = ["parse", "borsh"], optional = true }
+defuse-webauthn = { git = "https://github.com/near/intents", rev = "980c19e8b2d6ca864e01a3c2b5a9a12dd1d19683", default-features = false, features = ["borsh"], optional = true }
+
+arbitrary = { version = "1.4", optional = true }
+rand_core = { version = "0.6", optional = true }
+
+[features]
+abi = [
+  "defuse-bitmap/abi",
+  "defuse-borsh-utils/abi",
+  "defuse-crypto?/abi",
+  "defuse-deadline/abi",
+  "defuse-serde-utils/abi",
+  "defuse-webauthn?/abi",
+  "near-sdk/abi",
+]
+arbitrary = ["dep:arbitrary", "near-sdk/arbitrary"]
+concurrent = ["dep:rand_core"]
+webauthn = ["dep:defuse-webauthn"]
+
+contract = [
+  "defuse-crypto?/near-contract",
+  "defuse-deadline/near-contract",
+  "defuse-webauthn?/near-contract",
+]
+
+webauthn-ed25519 = ["defuse-webauthn/ed25519", "webauthn"]
+webauthn-p256 = ["defuse-webauthn/p256", "webauthn"]
+
+ed25519 = ["defuse-crypto/ed25519", "defuse-crypto/near-contract"]
+
+[dev-dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+defuse-test-utils = { git = "https://github.com/near/intents", rev = "980c19e8b2d6ca864e01a3c2b5a9a12dd1d19683" }
+near-sdk = { workspace = true, features = ["arbitrary", "deterministic-account-ids", "unit-testing"] }
+rand = "0.10"
+rstest = "0.25"
+
+[package.metadata.near.reproducible_build]
+image = "sourcescan/cargo-near:0.19.0-rust-1.86.0"
+image_digest = "sha256:772638e343baeeea24e49062c7d424274f3441452cc06ce97fc4e5695b19fecc"
+passed_env = []
+container_build_command = ["cargo", "near", "build", "non-reproducible-wasm", "--locked", "--no-default-features", "--features=contract", "--no-abi"]

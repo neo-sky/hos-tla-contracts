@@ -1,0 +1,15 @@
+[package]
+name = "test-ft"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+repository = "https://github.com/neo-sky/hos-tla-contracts"
+license = "MIT OR Apache-2.0"
+description = "Minimal NEP-141 fungible token used only by the integration test suite. Not for deployment."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = { workspace = true }
