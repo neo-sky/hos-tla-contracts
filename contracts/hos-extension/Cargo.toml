@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 near-sdk = { workspace = true }
+hos-common = { path = "../../crates/hos-common" }
 defuse-wallet = { git = "https://github.com/near/intents", rev = "980c19e8b2d6ca864e01a3c2b5a9a12dd1d19683", default-features = false }
 defuse-deadline = { git = "https://github.com/near/intents", rev = "980c19e8b2d6ca864e01a3c2b5a9a12dd1d19683", default-features = false, features = ["borsh", "serde", "near-contract"] }
 

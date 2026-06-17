@@ -1,4 +1,5 @@
 mod admin;
+mod asset_gate;
 mod business;
 mod callbacks;
 mod error;
@@ -220,6 +221,13 @@ impl TlaRegistry {
         self.pending_refunds
             .insert(account.clone(), existing.saturating_add(amount));
         self.total_pending_refunds = self.total_pending_refunds.saturating_add(amount);
+    }
+
+    pub(crate) fn refund_excess(&mut self, payer: &AccountId, attached: u128, charged: u128) {
+        let excess = attached.saturating_sub(charged);
+        if excess > 0 {
+            self.add_pending_refund(payer, excess);
+        }
     }
 
     pub(crate) fn available_balance(&self) -> u128 {

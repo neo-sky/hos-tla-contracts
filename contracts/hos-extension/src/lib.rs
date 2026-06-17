@@ -9,8 +9,8 @@ use near_sdk::json_types::U128;
 use near_sdk::serde_json::json;
 use near_sdk::store::IterableSet;
 use near_sdk::{
-    env, ext_contract, near, AccountId, BorshStorageKey, CurveType, Gas, NearToken, PanicOnDefault,
-    Promise, PromiseError, PromiseOrValue, PublicKey,
+    env, ext_contract, near, AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise,
+    PromiseError, PromiseOrValue, PublicKey,
 };
 
 const CONTRACT_VERSION: u8 = 1;
@@ -394,13 +394,7 @@ impl HosExtension {
 }
 
 fn ed25519_base58(key: &PublicKey) -> Result<String, ContractError> {
-    if key.curve_type() != CurveType::ED25519 {
-        return Err(ContractError::NotEd25519);
-    }
-    key.to_string()
-        .strip_prefix("ed25519:")
-        .map(str::to_string)
-        .ok_or(ContractError::NotEd25519)
+    hos_common::ed25519_base58(key).ok_or(ContractError::NotEd25519)
 }
 
 fn sweep_request(ft: &AccountId, destination: &AccountId, amount: U128) -> Request {

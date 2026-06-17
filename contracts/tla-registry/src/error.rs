@@ -31,8 +31,6 @@ pub enum ContractError {
     WithdrawalAmountZero,
     TokenNotInAllowlist,
     AllowlistFull,
-    AllowlistLengthMismatch,
-    InvalidFtBalanceResponse,
     AllRentTiersZero,
     CreationDepositZero,
     CannotRemoveLastAdmin,

@@ -17,7 +17,8 @@ of House of Stake singleton extensions, never by a raw FullAccess key.
 | `hos-wallet` | Vendored fork of the Defuse `wallet-no-sign` contract. The signing path always rejects; all authority flows through the extensions. Carries its own README and LICENSE. |
 
 `dev-contracts/test-ft` is a minimal fungible token used only by the integration
-tests. `integration/` holds the near-workspaces sandbox suite.
+tests. `crates/hos-common` holds pure helpers shared across the contracts.
+`integration/` holds the near-workspaces sandbox suite.
 
 ## Build
 
@@ -41,7 +42,7 @@ Format and lint the House of Stake crates. The vendored `hos-wallet` fork keeps
 upstream formatting and is excluded from the format gate by package selection
 (`cargo fmt` does not honor rustfmt `ignore` directives):
 
-    cargo fmt --check -p active-signer -p hos-extension -p mpc-recovery -p tla-manager -p tla-registry -p test-ft
+    cargo fmt --check -p hos-common -p active-signer -p hos-extension -p mpc-recovery -p tla-manager -p tla-registry -p test-ft
     cargo clippy --workspace --all-targets -- -D warnings
 
 Unit tests run across the workspace:

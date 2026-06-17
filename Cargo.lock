@@ -1542,11 +1542,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hos-common"
+version = "0.1.0"
+dependencies = [
+ "near-sdk",
+]
+
+[[package]]
 name = "hos-extension"
 version = "0.1.0"
 dependencies = [
  "defuse-deadline",
  "defuse-wallet",
+ "hos-common",
  "near-sdk",
 ]
 
@@ -2040,6 +2048,7 @@ name = "mpc-recovery"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "hos-common",
  "near-sdk",
  "rand 0.8.6",
 ]
@@ -3708,6 +3717,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 name = "tla-manager"
 version = "0.1.0"
 dependencies = [
+ "hos-common",
  "near-sdk",
 ]
 

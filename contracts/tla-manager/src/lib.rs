@@ -124,11 +124,7 @@ impl TlaManager {
 }
 
 fn ed25519_base58(key: &PublicKey) -> String {
-    require!(key.curve_type() == CurveType::ED25519, error::NOT_ED25519);
-    key.to_string()
-        .strip_prefix("ed25519:")
-        .unwrap_or_else(|| env::panic_str(error::NOT_ED25519))
-        .to_string()
+    hos_common::ed25519_base58(key).unwrap_or_else(|| env::panic_str(error::NOT_ED25519))
 }
 
 #[cfg(test)]

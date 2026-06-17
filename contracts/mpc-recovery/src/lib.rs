@@ -8,8 +8,8 @@ use near_sdk::json_types::{Base58CryptoHash, Base64VecU8, U64};
 use near_sdk::serde_json::{json, Value};
 use near_sdk::store::LookupMap;
 use near_sdk::{
-    env, near, require, AccountId, CurveType, Gas, NearToken, PanicOnDefault, Promise,
-    PromiseError, PromiseOrValue, PublicKey,
+    env, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise, PromiseError,
+    PromiseOrValue, PublicKey,
 };
 
 use crate::events::Event;
@@ -445,55 +445,53 @@ impl MpcRecovery {
     }
 }
 
+fn call_signer(active_signer: AccountId, method: &str, args: Value, gas: Gas) -> Promise {
+    Promise::new(active_signer).function_call(
+        method.to_string(),
+        args.to_string().into_bytes(),
+        NearToken::from_yoctonear(0),
+        gas,
+    )
+}
+
 fn swap_owner(
     active_signer: AccountId,
     account: &AccountId,
     new_owner: &PublicKey,
     bound_owner: &PublicKey,
 ) -> Promise {
-    let args = json!({
-        "wallet": account,
-        "new_public_key": ed25519_base58(new_owner),
-        "expected_current": ed25519_base58(bound_owner),
-    })
-    .to_string()
-    .into_bytes();
-    Promise::new(active_signer).function_call(
-        "swap_owner".to_string(),
-        args,
-        NearToken::from_yoctonear(0),
+    call_signer(
+        active_signer,
+        "swap_owner",
+        json!({
+            "wallet": account,
+            "new_public_key": ed25519_base58(new_owner),
+            "expected_current": ed25519_base58(bound_owner),
+        }),
         SWAP_GAS,
     )
 }
 
 fn freeze(active_signer: AccountId, account: &AccountId, bound_owner: &PublicKey) -> Promise {
-    let args = json!({ "wallet": account, "expected_current": ed25519_base58(bound_owner) })
-        .to_string()
-        .into_bytes();
-    Promise::new(active_signer).function_call(
-        "freeze".to_string(),
-        args,
-        NearToken::from_yoctonear(0),
+    call_signer(
+        active_signer,
+        "freeze",
+        json!({ "wallet": account, "expected_current": ed25519_base58(bound_owner) }),
         FREEZE_GAS,
     )
 }
 
 fn unfreeze(active_signer: AccountId, account: &AccountId) -> Promise {
-    let args = json!({ "wallet": account }).to_string().into_bytes();
-    Promise::new(active_signer).function_call(
-        "unfreeze".to_string(),
-        args,
-        NearToken::from_yoctonear(0),
+    call_signer(
+        active_signer,
+        "unfreeze",
+        json!({ "wallet": account }),
         FREEZE_GAS,
     )
 }
 
 fn ed25519_base58(key: &PublicKey) -> String {
-    require!(key.curve_type() == CurveType::ED25519, error::NOT_ED25519);
-    key.to_string()
-        .strip_prefix("ed25519:")
-        .unwrap_or_else(|| env::panic_str(error::NOT_ED25519))
-        .to_string()
+    hos_common::ed25519_base58(key).unwrap_or_else(|| env::panic_str(error::NOT_ED25519))
 }
 
 fn into_sig(bytes: Vec<u8>) -> [u8; 64] {

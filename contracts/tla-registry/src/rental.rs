@@ -52,11 +52,7 @@ impl TlaRegistry {
         };
 
         self.total_revenue = self.total_revenue.saturating_add(required);
-
-        let excess = attached_yocto.saturating_sub(required);
-        if excess > 0 {
-            self.add_pending_refund(&caller, excess);
-        }
+        self.refund_excess(&caller, attached_yocto, required);
 
         Event::TlaActivated {
             tla_id,
@@ -223,11 +219,7 @@ impl TlaRegistry {
             entry.expires_at
         };
         self.total_revenue = self.total_revenue.saturating_add(rent);
-
-        let excess = attached.as_yoctonear().saturating_sub(rent);
-        if excess > 0 {
-            self.add_pending_refund(&caller, excess);
-        }
+        self.refund_excess(&caller, attached.as_yoctonear(), rent);
 
         Event::TlaRenewed {
             entity: tla_id,
@@ -321,11 +313,7 @@ impl TlaRegistry {
             sub.expires_at
         };
         self.total_revenue = self.total_revenue.saturating_add(rent);
-
-        let excess = attached.as_yoctonear().saturating_sub(rent);
-        if excess > 0 {
-            self.add_pending_refund(&caller, excess);
-        }
+        self.refund_excess(&caller, attached.as_yoctonear(), rent);
 
         Event::SubAccountRenewed {
             entity: key,

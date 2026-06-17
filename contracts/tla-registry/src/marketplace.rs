@@ -1,3 +1,4 @@
+use crate::asset_gate::{ft_balances_clear, BalanceGate};
 use crate::error::ContractError;
 use crate::events::Event;
 use crate::fees;
@@ -7,16 +8,12 @@ use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
 use near_sdk::json_types::U128;
 use near_sdk::serde::{Deserialize, Serialize};
-use near_sdk::{
-    env, is_promise_success, near, AccountId, Gas, Promise, PromiseError, PromiseOrValue, PublicKey,
-};
+use near_sdk::{env, is_promise_success, near, AccountId, Gas, Promise, PromiseOrValue, PublicKey};
 
 const GAS_FOR_FORCE_TRANSFER: Gas = Gas::from_tgas(20);
 const GAS_FOR_SOLD_CALLBACK: Gas = Gas::from_tgas(20);
 const GAS_FOR_FT_BALANCE: Gas = Gas::from_tgas(5);
 const GAS_FOR_BUY_BALANCES_CB: Gas = Gas::from_tgas(60);
-
-const FT_BALANCE_MAX_LEN: usize = 256;
 
 #[derive(Serialize, Deserialize)]
 #[serde(crate = "near_sdk::serde")]
@@ -237,10 +234,7 @@ impl TlaRegistry {
             fees::split_resale(price.0, self.fee_config.resale_commission_bps);
         self.total_revenue = self.total_revenue.saturating_add(commission);
         self.add_pending_refund(&seller, seller_proceeds);
-        let excess = deposit.0.saturating_sub(price.0);
-        if excess > 0 {
-            self.add_pending_refund(&buyer, excess);
-        }
+        self.refund_excess(&buyer, deposit.0, price.0);
         if let Some(sub) = self.sub_accounts.get_mut(&key) {
             sub.owner = buyer.clone();
             sub.main_wallet = buyer.clone();
@@ -266,7 +260,7 @@ impl TlaRegistry {
         allowlist: Vec<AccountId>,
     ) -> PromiseOrValue<()> {
         let key = sub_account_key(&settlement.tla_id, &settlement.name);
-        if let Some((token, reason)) = sale_block_reason(&allowlist) {
+        if let BalanceGate::Blocked { token, reason } = ft_balances_clear(&allowlist) {
             return self.abort_sale(&key, &settlement, &token, &reason);
         }
         match key.parse::<AccountId>() {
@@ -440,28 +434,4 @@ fn settle_transfer(
                     settlement.deposit,
                 ),
         )
-}
-
-fn sale_block_reason(allowlist: &[AccountId]) -> Option<(String, String)> {
-    if env::promise_results_count() != allowlist.len() as u64 {
-        return Some((String::new(), String::from("result_count_mismatch")));
-    }
-    for (index, token) in allowlist.iter().enumerate() {
-        if let Some(reason) = ft_balance_block_reason(index as u64) {
-            return Some((token.as_str().to_string(), reason));
-        }
-    }
-    None
-}
-
-fn ft_balance_block_reason(index: u64) -> Option<String> {
-    match env::promise_result_checked(index, FT_BALANCE_MAX_LEN) {
-        Ok(bytes) => match near_sdk::serde_json::from_slice::<U128>(&bytes) {
-            Ok(balance) if balance.0 > 0 => Some(balance.0.to_string()),
-            Ok(_) => None,
-            Err(_) => Some(String::from("balance_unverifiable")),
-        },
-        Err(PromiseError::Failed) => Some(String::from("balance_query_failed")),
-        Err(_) => Some(String::from("balance_query_unverifiable")),
-    }
 }

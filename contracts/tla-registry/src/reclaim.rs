@@ -1,12 +1,12 @@
+use crate::asset_gate::{ft_balances_clear, BalanceGate};
 use crate::error::ContractError;
 use crate::events::Event;
 use crate::interfaces::{ext_ft, ext_hos_extension};
 use crate::mother::effective_sub_lifecycle;
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
-use near_sdk::json_types::U128;
 use near_sdk::{
-    env, is_promise_success, near, AccountId, FunctionError, Gas, NearToken, Promise, PromiseError,
+    env, is_promise_success, near, AccountId, FunctionError, Gas, NearToken, Promise,
     PromiseOrValue,
 };
 
@@ -15,8 +15,6 @@ const GAS_FOR_HOS_FORCE_TRANSFER: Gas = Gas::from_tgas(20);
 const GAS_FOR_FINALIZE_CB: Gas = Gas::from_tgas(10);
 const GAS_FOR_BALANCE_QUERY: Gas = Gas::from_tgas(5);
 const GAS_FOR_BALANCES_CB_TOTAL: Gas = Gas::from_tgas(55);
-
-const FT_BALANCE_MAX_LEN: usize = 256;
 
 const SWEEP_ATTACHED_REQUIRED: NearToken =
     NearToken::from_yoctonear(1_250_000_000_000_000_000_000 + 1);
@@ -39,38 +37,7 @@ impl TlaRegistry {
         if !self.ft_allowlist.contains(&ft) {
             return Err(ContractError::TokenNotInAllowlist);
         }
-        let sub_account: AccountId = key
-            .parse()
-            .map_err(|_| ContractError::InvalidSubAccountId)?;
-        if self
-            .mother_use_count
-            .get(&sub_account)
-            .copied()
-            .unwrap_or(0)
-            > 0
-        {
-            return Err(ContractError::SubAccountIsMother);
-        }
-        let destination;
-        {
-            let sub = self
-                .sub_accounts
-                .get(&key)
-                .ok_or(ContractError::SubAccountNotFound)?;
-            let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
-            if !matches!(
-                effective_sub_lifecycle(
-                    sub,
-                    tla,
-                    self.fee_config.retraction_notice_ns.0,
-                    self.grace_period_ns,
-                ),
-                LifecycleStatus::Reclaimable
-            ) {
-                return Err(ContractError::SubAccountNotReclaimable);
-            }
-            destination = sub.main_wallet.clone();
-        }
+        let (sub_account, destination) = self.resolve_reclaimable(&tla_id, &key)?;
 
         Ok(ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_HOS_SWEEP)
@@ -86,38 +53,7 @@ impl TlaRegistry {
     ) -> Result<Promise, ContractError> {
         self.assert_not_paused()?;
         let key = sub_account_key(&tla_id, &name);
-        let sub_account: AccountId = key
-            .parse()
-            .map_err(|_| ContractError::InvalidSubAccountId)?;
-        if self
-            .mother_use_count
-            .get(&sub_account)
-            .copied()
-            .unwrap_or(0)
-            > 0
-        {
-            return Err(ContractError::SubAccountIsMother);
-        }
-        let destination;
-        {
-            let sub = self
-                .sub_accounts
-                .get(&key)
-                .ok_or(ContractError::SubAccountNotFound)?;
-            let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
-            if !matches!(
-                effective_sub_lifecycle(
-                    sub,
-                    tla,
-                    self.fee_config.retraction_notice_ns.0,
-                    self.grace_period_ns,
-                ),
-                LifecycleStatus::Reclaimable
-            ) {
-                return Err(ContractError::SubAccountNotReclaimable);
-            }
-            destination = sub.main_wallet.clone();
-        }
+        let (sub_account, destination) = self.resolve_reclaimable(&tla_id, &key)?;
 
         let allowlist: Vec<AccountId> = self.ft_allowlist.iter().cloned().collect();
 
@@ -152,55 +88,19 @@ impl TlaRegistry {
         allowlist: Vec<AccountId>,
     ) -> PromiseOrValue<()> {
         let key = sub_account_key(&tla_id, &name);
-        let count = env::promise_results_count();
-        for i in 0..count {
-            let idx = i as usize;
-            let token = match allowlist.get(idx) {
-                Some(t) => t,
-                None => ContractError::AllowlistLengthMismatch.panic(),
-            };
-            match env::promise_result_checked(i, FT_BALANCE_MAX_LEN) {
-                Ok(bytes) => {
-                    let balance: U128 = match near_sdk::serde_json::from_slice(&bytes) {
-                        Ok(v) => v,
-                        Err(_) => ContractError::InvalidFtBalanceResponse.panic(),
-                    };
-                    if balance.0 > 0 {
-                        Event::ReclaimFinalizeBlocked {
-                            full_name: key.clone(),
-                            token: token.as_str().to_string(),
-                            reason: balance.0.to_string(),
-                        }
-                        .emit();
-                        return PromiseOrValue::Value(());
-                    }
-                }
-                Err(PromiseError::Failed) => {
-                    Event::ReclaimFinalizeBlocked {
-                        full_name: key.clone(),
-                        token: token.as_str().to_string(),
-                        reason: "balance_query_failed".to_string(),
-                    }
-                    .emit();
-                    return PromiseOrValue::Value(());
-                }
-                Err(_) => {
-                    Event::ReclaimFinalizeBlocked {
-                        full_name: key.clone(),
-                        token: token.as_str().to_string(),
-                        reason: "balance_query_unverifiable".to_string(),
-                    }
-                    .emit();
-                    return PromiseOrValue::Value(());
-                }
+        if let BalanceGate::Blocked { token, reason } = ft_balances_clear(&allowlist) {
+            Event::ReclaimFinalizeBlocked {
+                full_name: key,
+                token,
+                reason,
             }
+            .emit();
+            return PromiseOrValue::Value(());
         }
-
         let sub_account: AccountId = match key.parse() {
             Ok(a) => a,
             Err(_) => ContractError::InvalidSubAccountId.panic(),
         };
-
         PromiseOrValue::Promise(self.park_wallet(sub_account, tla_id, name, destination))
     }
 
@@ -245,6 +145,42 @@ impl TlaRegistry {
 }
 
 impl TlaRegistry {
+    fn resolve_reclaimable(
+        &self,
+        tla_id: &AccountId,
+        key: &str,
+    ) -> Result<(AccountId, AccountId), ContractError> {
+        let sub_account: AccountId = key
+            .parse()
+            .map_err(|_| ContractError::InvalidSubAccountId)?;
+        if self
+            .mother_use_count
+            .get(&sub_account)
+            .copied()
+            .unwrap_or(0)
+            > 0
+        {
+            return Err(ContractError::SubAccountIsMother);
+        }
+        let sub = self
+            .sub_accounts
+            .get(key)
+            .ok_or(ContractError::SubAccountNotFound)?;
+        let tla = self.tlas.get(tla_id).ok_or(ContractError::TlaNotFound)?;
+        if !matches!(
+            effective_sub_lifecycle(
+                sub,
+                tla,
+                self.fee_config.retraction_notice_ns.0,
+                self.grace_period_ns,
+            ),
+            LifecycleStatus::Reclaimable
+        ) {
+            return Err(ContractError::SubAccountNotReclaimable);
+        }
+        Ok((sub_account, sub.main_wallet.clone()))
+    }
+
     pub(crate) fn park_wallet(
         &self,
         sub_account: AccountId,

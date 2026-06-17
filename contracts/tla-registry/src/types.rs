@@ -185,22 +185,24 @@ pub struct BusinessRenewalCostView {
     pub total_yocto: U128,
 }
 
+fn time_lifecycle(expires_at: u64, grace_period_ns: u64) -> LifecycleStatus {
+    let now = env::block_timestamp();
+    let grace_end = expires_at.saturating_add(grace_period_ns);
+    if now < expires_at {
+        LifecycleStatus::Active
+    } else if now < grace_end {
+        LifecycleStatus::Grace
+    } else {
+        LifecycleStatus::Reclaimable
+    }
+}
+
 impl TlaEntry {
     pub fn lifecycle(&self, grace_period_ns: u64) -> LifecycleStatus {
         match self.status {
             TlaStatus::Registered => LifecycleStatus::Registered,
             TlaStatus::Suspended => LifecycleStatus::Suspended,
-            TlaStatus::Active => {
-                let now = env::block_timestamp();
-                let grace_end = self.expires_at.saturating_add(grace_period_ns);
-                if now < self.expires_at {
-                    LifecycleStatus::Active
-                } else if now < grace_end {
-                    LifecycleStatus::Grace
-                } else {
-                    LifecycleStatus::Reclaimable
-                }
-            }
+            TlaStatus::Active => time_lifecycle(self.expires_at, grace_period_ns),
         }
     }
 
@@ -211,15 +213,7 @@ impl TlaEntry {
 
 impl SubAccountEntry {
     pub fn lifecycle(&self, grace_period_ns: u64) -> LifecycleStatus {
-        let now = env::block_timestamp();
-        let grace_end = self.expires_at.saturating_add(grace_period_ns);
-        if now < self.expires_at {
-            LifecycleStatus::Active
-        } else if now < grace_end {
-            LifecycleStatus::Grace
-        } else {
-            LifecycleStatus::Reclaimable
-        }
+        time_lifecycle(self.expires_at, grace_period_ns)
     }
 }
 

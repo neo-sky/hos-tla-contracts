@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/hos-common",
     "contracts/mpc-recovery",
     "contracts/active-signer",
     "contracts/hos-extension",
