@@ -70,18 +70,6 @@ pub enum Event {
         by: AccountId,
     },
     #[event_version("1.0.0")]
-    NftAllowlistAdded {
-        kind: String,
-        token: AccountId,
-        by: AccountId,
-    },
-    #[event_version("1.0.0")]
-    NftAllowlistRemoved {
-        kind: String,
-        token: AccountId,
-        by: AccountId,
-    },
-    #[event_version("1.0.0")]
     HosExtensionUpdated {
         hos_extension: AccountId,
         by: AccountId,

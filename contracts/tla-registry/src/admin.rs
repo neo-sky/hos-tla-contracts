@@ -5,7 +5,7 @@ use crate::{TlaRegistry, TlaRegistryExt};
 use near_sdk::json_types::U128;
 use near_sdk::{env, near, AccountId, CurveType, PublicKey};
 
-const MAX_ALLOWLIST_SIZE: u32 = 40;
+const MAX_ALLOWLIST_SIZE: u32 = 16;
 
 #[near]
 impl TlaRegistry {
@@ -230,40 +230,6 @@ impl TlaRegistry {
         }
         Event::FtAllowlistRemoved {
             kind: "ft".to_string(),
-            token,
-            by: env::predecessor_account_id(),
-        }
-        .emit();
-        Ok(())
-    }
-
-    #[handle_result]
-    pub fn add_nft_allowlist(&mut self, token: AccountId) -> Result<(), ContractError> {
-        self.assert_admin()?;
-        if self.nft_allowlist.contains(&token) {
-            return Ok(());
-        }
-        if self.nft_allowlist.len() >= MAX_ALLOWLIST_SIZE {
-            return Err(ContractError::AllowlistFull);
-        }
-        self.nft_allowlist.insert(token.clone());
-        Event::NftAllowlistAdded {
-            kind: "nft".to_string(),
-            token,
-            by: env::predecessor_account_id(),
-        }
-        .emit();
-        Ok(())
-    }
-
-    #[handle_result]
-    pub fn remove_nft_allowlist(&mut self, token: AccountId) -> Result<(), ContractError> {
-        self.assert_admin()?;
-        if !self.nft_allowlist.remove(&token) {
-            return Ok(());
-        }
-        Event::NftAllowlistRemoved {
-            kind: "nft".to_string(),
             token,
             by: env::predecessor_account_id(),
         }

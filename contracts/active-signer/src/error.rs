@@ -14,3 +14,4 @@ pub const BAD_SIGNATURE: &str = "invalid signature";
 pub const NONCE_REJECTED: &str = "nonce already used or expired";
 pub const UNAUTHORIZED: &str = "unauthorized";
 pub const BAD_KEY: &str = "invalid ed25519 public key";
+pub const SIGNER_EXISTS: &str = "signer already installed";

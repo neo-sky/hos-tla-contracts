@@ -18,6 +18,23 @@ target modes.
 - **Wallet (`hos-wallet`)** has no FullAccess key; all authority flows through the
   installed extensions.
 
+## Deployment and governance invariants
+
+These are not enforced by contract code and MUST hold in deployment:
+
+- **Locked TLA accounts.** Each TLA account (which runs `tla-manager` and is a
+  minter on `active-signer`) must hold no FullAccess key; only its registry-gated
+  contract methods may be callable. `install_signer` is install-once (it rejects an
+  existing entry, so key rotation goes through the authority-gated `swap_owner`),
+  which means a minter cannot re-key an existing sub-account. A TLA account that
+  retained a FullAccess key could still pre-occupy or grief signer slots under its
+  namespace; the locked-account invariant prevents that.
+- **Multisig governance.** The admin role on `active-signer`, `hos-extension`, and
+  `tla-registry` is effectively unrestricted over wallets and funds (it can rewire
+  the registry pointer, manage minters, set fees, and queue withdrawals). The admin
+  accounts must be a multisig with a timelock (the Security Council), never a single
+  key; contract upgrades sit behind a separate, longer timelock.
+
 ## Recovery: common guarantees
 
 - **Attestation binding.** A recovery request is verified against the policy's
@@ -33,6 +50,10 @@ target modes.
 - **No-brick callbacks.** Cross-contract callbacks never panic on the failure
   branch; an in-flight recovery is always resolvable via retryable finalize or
   abort.
+- **Transfer reset is best-effort.** A marketplace transfer resets the wallet's
+  recovery policy via a fire-and-forget call; if that call fails, the stale policy
+  is harmless because the bound-owner compare-and-swap voids any finalize against a
+  wallet whose owner has since changed.
 
 ## Recovery modes
 
@@ -82,7 +103,9 @@ for House of Stake managed sub-accounts.
   lock; concurrent settlement attempts are rejected.
 - **Asset gate.** A sale or reclaim that would move a sub-account is blocked unless
   every allow-listed fungible-token balance is provably zero. The gate is
-  fail-closed: a failed or unparseable balance query blocks.
+  fail-closed: a failed or unparseable balance query blocks. The fungible-token
+  allowlist is bounded (16 entries) so the per-token balance fan-out stays within
+  the gas limit; raising the bound requires re-validating the gas budget.
 - **Refunds.** All refunds are pull-based (`claim_refund`); the contract never
   pushes funds in a way that can wedge on a failed transfer.
 - **Business namespaces.** Sub-accounts under a Business (licensee-gated) TLA are
@@ -90,6 +113,10 @@ for House of Stake managed sub-accounts.
 
 ## Out of scope
 
+- **Non-fungible tokens.** The asset gate covers fungible tokens only. NFTs are not
+  gated and transfer with the sub-account on a sale or reclaim; a seller is
+  responsible for moving out any NFTs before listing. NFT-aware gating is a future
+  (V2) feature.
 - The vendored `hos-wallet` fork (Defuse `wallet-no-sign`) is audited upstream and
   pinned by commit; only the added `init` is in scope here.
 - Off-chain components (relay, attestation issuance) are outside this on-chain

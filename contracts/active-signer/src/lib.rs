@@ -98,9 +98,7 @@ impl ActiveSigner {
             is_direct_subaccount(&wallet, &env::predecessor_account_id()),
             error::WALLET_NOT_UNDER_MINTER
         );
-        if let Some(existing) = self.signers.get(&wallet) {
-            require!(!existing.frozen, error::FROZEN);
-        }
+        require!(self.signers.get(&wallet).is_none(), error::SIGNER_EXISTS);
         let public_key = parse_key(&public_key);
         let timeout = Duration::from_secs(self.timeout_secs.into());
         self.signers.insert(
@@ -595,19 +593,16 @@ mod tests {
     }
 
     #[test]
-    fn reinstall_on_unfrozen_wallet_overwrites() {
+    #[should_panic(expected = "signer already installed")]
+    fn reinstall_rejected_when_signer_exists() {
         let mut c = deploy();
         install(&mut c, &key(7));
         ctx(MINTER, 0, TS);
         c.install_signer(acc(WALLET), Signer::public_key(&key(8)).to_string());
-        assert_eq!(
-            c.signer_of(acc(WALLET)),
-            Some(Signer::public_key(&key(8)).to_string())
-        );
     }
 
     #[test]
-    #[should_panic(expected = "frozen by recovery")]
+    #[should_panic(expected = "signer already installed")]
     fn reinstall_on_frozen_wallet_rejected() {
         let mut c = deploy();
         install(&mut c, &key(7));

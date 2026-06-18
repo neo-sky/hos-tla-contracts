@@ -117,10 +117,6 @@ impl TlaRegistry {
     pub fn get_ft_allowlist(&self) -> Vec<AccountId> {
         self.ft_allowlist.iter().cloned().collect()
     }
-
-    pub fn get_nft_allowlist(&self) -> Vec<AccountId> {
-        self.nft_allowlist.iter().cloned().collect()
-    }
 }
 
 pub(crate) fn to_tla_view(
