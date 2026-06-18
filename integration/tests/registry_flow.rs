@@ -23,6 +23,7 @@ const HOS_EXTENSION_WASM: &str = "../target/near/hos_extension/hos_extension.was
 const HOS_WALLET_WASM: &str = "../target/near/hos_wallet/hos_wallet.wasm";
 const TLA_MANAGER_WASM: &str = "../target/near/tla_manager/tla_manager.wasm";
 const TLA_REGISTRY_WASM: &str = "../target/near/tla_registry/tla_registry.wasm";
+const TEST_FT_WASM: &str = "../target/near/test_ft/test_ft.wasm";
 
 const TIMEOUT_SECS: u32 = 3600;
 const GRACE_NS: u64 = 30 * 24 * 60 * 60 * 1_000_000_000;
@@ -619,4 +620,89 @@ async fn pending_refund(registry: &Contract, account: &AccountId) -> Result<u128
 async fn registry_total_revenue(registry: &Contract) -> Result<u128> {
     let stats: serde_json::Value = registry.view("get_stats").await?.json()?;
     Ok(stats["total_revenue_yocto"].as_str().unwrap().parse()?)
+}
+
+#[tokio::test]
+async fn asset_gate_fits_gas_at_full_allowlist() -> Result<()> {
+    let env = setup(true).await?;
+    let root = env.worker.root_account()?;
+
+    for i in 0..16u8 {
+        let ft = deploy_at(&root, &format!("ft{i}"), 3, TEST_FT_WASM).await?;
+        ft.call("new")
+            .args_json(json!({ "owner": ft.id(), "total_supply": "0" }))
+            .transact()
+            .await?
+            .into_result()?;
+        env.admin
+            .call(env.registry.id(), "add_ft_allowlist")
+            .args_json(json!({ "token": ft.id() }))
+            .transact()
+            .await?
+            .into_result()?;
+    }
+
+    let owner = user_key(7);
+    env.renter
+        .call(env.registry.id(), "rent_sub_account")
+        .args_json(json!({
+            "tla_id": env.tla.id(),
+            "name": "alice",
+            "owner_key": ws_pubkey(&owner),
+            "main_wallet": env.renter.id(),
+        }))
+        .deposit(NearToken::from_near(10))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    env.renter
+        .call(env.registry.id(), "list_sub_account")
+        .args_json(json!({
+            "tla_id": env.tla.id(),
+            "name": "alice",
+            "price": NearToken::from_near(5).as_yoctonear().to_string(),
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let buyer = root
+        .create_subaccount("buyer")
+        .initial_balance(NearToken::from_near(50))
+        .transact()
+        .await?
+        .into_result()?;
+    let buyer_key = user_key(8);
+    let buy = buyer
+        .call(env.registry.id(), "buy_sub_account")
+        .args_json(json!({
+            "tla_id": env.tla.id(),
+            "name": "alice",
+            "new_owner_key": ws_pubkey(&buyer_key),
+        }))
+        .deposit(NearToken::from_near(6))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        buy.is_success(),
+        "buy must fit in gas with a full 16-token asset-gate fan-out: {buy:#?}"
+    );
+
+    let wallet_id: AccountId = format!("alice.{}", env.tla.id()).parse()?;
+    let new_owner: Option<String> = env
+        .active_signer
+        .view("signer_of")
+        .args_json(json!({ "wallet": wallet_id }))
+        .await?
+        .json()?;
+    assert_eq!(
+        new_owner.as_deref(),
+        Some(raw_base58(&buyer_key).as_str()),
+        "sale settles after the gate clears all 16 balances within gas"
+    );
+
+    Ok(())
 }

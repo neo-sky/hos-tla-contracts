@@ -82,6 +82,11 @@ either of MIT or Apache-2.0 at your option. See [LICENSE-MIT](LICENSE-MIT) and
 (`near/intents`) and remains under its upstream MIT license, Copyright (c) 2025
 NEAR Foundation. See [contracts/hos-wallet/LICENSE](contracts/hos-wallet/LICENSE).
 
+## Deploy
+
+[DEPLOY.md](DEPLOY.md) has the deploy sequence, the fixed-at-init contract wiring,
+the per-TLA setup, and the governance handoff to the admin multisig.
+
 ## Status
 
 Pre-audit. Not yet deployed to mainnet.

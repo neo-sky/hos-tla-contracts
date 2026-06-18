@@ -1,123 +1,128 @@
 # Threat Model
 
-This document covers the security model of the House of Stake TLA contract suite,
-with emphasis on the opt-in account recovery system (`mpc-recovery`) and its two
-target modes.
+This is the security model for the House of Stake TLA contracts. Most of the
+attention goes to the opt-in recovery system, because that is where the trust
+assumptions are least obvious and the blast radius is largest.
 
 ## Trust boundaries
 
-- **Registry (`tla-registry`)** is the only caller permitted to drive marketplace
-  authority on a wallet (`hos-extension.force_transfer` / `sweep_ft`). It is
-  admin-governed.
-- **Active signer (`active-signer`)** holds the per-wallet owner key. Owner swap is
-  gated to the marketplace authority (sales) and the recovery authority
-  (recovery), with a compare-and-swap on the current owner and a freeze flag that
-  serializes the two.
-- **Recovery (`mpc-recovery`)** is opt-in per account. A policy binds an
-  attestation key, a watcher set, a quorum threshold, and a timelock at install.
-- **Wallet (`hos-wallet`)** has no FullAccess key; all authority flows through the
-  installed extensions.
+The contracts split authority along these lines:
+
+The registry (`tla-registry`) is the only account allowed to drive marketplace
+authority on a wallet, meaning `hos-extension.force_transfer` and `sweep_ft`. It is
+governed by the admin multisig described below.
+
+The active signer (`active-signer`) holds the per-wallet owner key. An owner swap
+can only come from the marketplace authority (a sale) or the recovery authority (a
+recovery), and both run through a compare-and-swap on the current owner plus a
+freeze flag that keeps the two from racing.
+
+Recovery (`mpc-recovery`) is opt-in, one policy per account. The policy binds an
+attestation key, a watcher set, a quorum threshold, and a timelock, all fixed at
+install.
+
+The wallet (`hos-wallet`) holds no FullAccess key. Every action flows through the
+extensions installed at mint.
 
 ## Deployment and governance invariants
 
-These are not enforced by contract code and MUST hold in deployment:
+Two properties the contracts cannot enforce on their own. They have to hold in
+deployment, and the auditor should confirm them on-chain.
 
-- **Locked TLA accounts.** Each TLA account (which runs `tla-manager` and is a
-  minter on `active-signer`) must hold no FullAccess key; only its registry-gated
-  contract methods may be callable. `install_signer` is install-once (it rejects an
-  existing entry, so key rotation goes through the authority-gated `swap_owner`),
-  which means a minter cannot re-key an existing sub-account. A TLA account that
-  retained a FullAccess key could still pre-occupy or grief signer slots under its
-  namespace; the locked-account invariant prevents that.
-- **Multisig governance.** The admin role on `active-signer`, `hos-extension`, and
-  `tla-registry` is effectively unrestricted over wallets and funds (it can rewire
-  the registry pointer, manage minters, set fees, and queue withdrawals). The admin
-  accounts must be a multisig with a timelock (the Security Council), never a single
-  key; contract upgrades sit behind a separate, longer timelock.
+**TLA accounts must be locked.** A TLA account runs `tla-manager` and is registered
+as a minter on `active-signer`, so it can mint signers for sub-accounts under its
+namespace. `install_signer` is install-once: it refuses to overwrite an existing
+entry, so the only way to rotate a key is the authority-gated `swap_owner`. That
+stops a minter from re-keying a live sub-account. It does not stop a TLA account
+that still holds a FullAccess key from squatting or griefing signer slots on names
+that have not been rented yet, so the account must have no FullAccess key. Only its
+registry-gated contract methods should be callable.
 
-## Recovery: common guarantees
+**Admin is the multisig.** The admin role on `active-signer`, `hos-extension`, and
+`tla-registry` is, in practice, unrestricted over wallets and funds: it can repoint
+the registry, manage minters, change fees, and queue withdrawals. It has to be a
+multisig with a timelock (the Security Council), not a single key. Contract upgrades
+sit behind a separate, longer timelock.
 
-- **Attestation binding.** A recovery request is verified against the policy's
-  install-bound attestation key, never a caller-supplied key.
-- **Replay and ordering.** Each policy carries a monotonic round; a request must
-  match the current round, and the round increments on acceptance, burning
-  replays.
-- **Timelock.** A verdict cannot settle until `timelock_secs` after the request.
-- **Watcher quorum.** Settlement requires `threshold` distinct, valid watcher
-  signatures over a domain-separated verdict message; duplicate and non-watcher
-  keys are ignored.
-- **Owner-gated abort.** The policy owner can abort an in-flight recovery.
-- **No-brick callbacks.** Cross-contract callbacks never panic on the failure
-  branch; an in-flight recovery is always resolvable via retryable finalize or
-  abort.
-- **Transfer reset is best-effort.** A marketplace transfer resets the wallet's
-  recovery policy via a fire-and-forget call; if that call fails, the stale policy
-  is harmless because the bound-owner compare-and-swap voids any finalize against a
-  wallet whose owner has since changed.
+## Recovery: shared guarantees
+
+Both recovery modes pass the same gate before anything settles on-chain:
+
+- A request is checked against the attestation key bound at install, never a key the
+  caller supplies.
+- Each policy carries a monotonic round. A request has to match the current round,
+  and the round advances on acceptance, so a captured attestation cannot be
+  replayed.
+- A verdict cannot settle until the timelock has elapsed.
+- Settlement needs `threshold` distinct, valid watcher signatures over a
+  domain-separated message; duplicate signatures and non-watcher keys are dropped
+  before counting.
+- The policy owner can abort an in-flight recovery.
+
+Two more properties hold under failure. Callbacks never panic on their failure
+branch, so a half-completed cross-contract call cannot brick a recovery; it stays
+resolvable through a retryable finalize or an abort. And the policy reset that a
+marketplace transfer fires is best-effort: if it fails, the stale policy is
+harmless, because the bound-owner compare-and-swap voids any later finalize against
+a wallet whose owner has since changed.
 
 ## Recovery modes
 
-### Wallet mode (default)
+A policy is one mode or the other, chosen at install.
 
-Recovery ends in `active-signer.swap_owner(wallet, new_owner, expected_current)`:
+**Wallet mode** is the default for managed sub-accounts. Recovery finishes with
+`active-signer.swap_owner`, guarded by the compare-and-swap on the bound owner, so a
+stale policy cannot rotate a wallet whose ownership already moved. The wallet is
+frozen at approval and unfrozen at finalize or abort, which is what serializes
+recovery against a sale. The only parties trusted here are the watcher set and
+whoever holds the attestation key.
 
-- The swap is guarded by a compare-and-swap on the bound owner; a stale policy
-  cannot rotate a wallet whose ownership changed (for example via a sale).
-- The wallet is frozen at approval and unfrozen at finalize or abort, serializing
-  recovery against marketplace sales.
+**Native mode** finishes with an `AddKey` on a raw NEAR account, signed by NEAR
+Chain Signatures (`v1.signer`). The contract builds the unsigned `AddKey`
+transaction byte-for-byte to the NEAR format, hashes it, and has the MPC signer sign
+the hash (`payload_v2: { Eddsa }`, `domain_id` for ed25519); the byte layout is
+pinned by a golden-vector test against `near-api-js`. The result is that the
+recovered key gets protocol-level FullAccess, which carries a few risks the wallet
+path does not:
 
-Trust assumptions: the watcher set and the attestation-key holder.
+- Liveness depends on `v1.signer`. If the MPC network is paused, so is native
+  recovery.
+- The new key is FullAccess. There is no extension gate to evict a prior key the way
+  wallet mode rotates an extension-mediated one; whoever holds it controls the
+  account outright.
+- The contract assembles the transaction itself, so a deviation from the NEAR format
+  would yield an invalid or wrong-permission signature. The golden-vector test is
+  what holds that line.
+- The signing key is derived under a per-account path, which has to be unique per
+  account or signatures could be reused across accounts.
 
-### Native mode
-
-Recovery ends in an `AddKey` on a raw NEAR account, signed by NEAR Chain
-Signatures (`v1.signer`) over a manually constructed transaction:
-
-- The unsigned `AddKey` transaction is built byte-for-byte to the NEAR transaction
-  format and hashed; the hash is signed by the MPC signer (`payload_v2: { Eddsa }`,
-  `domain_id` for ed25519). The byte layout is locked by a golden-vector test
-  against `near-api-js`.
-- `AddKey` grants the recovered key FullAccess to the target account.
-
-Additional trust assumptions and risks specific to Native mode:
-
-- **MPC signer dependency.** Recovery liveness depends on `v1.signer` availability
-  and correctness. If the MPC network is paused, Native recovery is paused.
-- **FullAccess grant.** Unlike wallet mode, which rotates an extension-mediated
-  key, Native mode adds a protocol-level FullAccess key. The new key holder has
-  unconditional control of the account; there is no extension gate to evict a
-  prior key.
-- **Transaction construction.** The contract builds the transaction bytes itself;
-  any divergence from the NEAR format would produce an invalid or wrong-permission
-  signature. This is constrained by the golden-vector test.
-- **Derivation path.** The signed key is derived under a per-account path; the path
-  must be unique per account to prevent cross-account signature reuse.
-
-Native mode is appropriate only where a protocol-level FullAccess recovery key and
-the `v1.signer` trust assumption are both acceptable. Wallet mode is the default
-for House of Stake managed sub-accounts.
+Use native mode only where a FullAccess recovery key and a dependency on `v1.signer`
+are both acceptable. Everything House of Stake manages defaults to wallet mode.
 
 ## Marketplace
 
-- **Sale serialization.** Listing and offer settlement set a per-listing `settling`
-  lock; concurrent settlement attempts are rejected.
-- **Asset gate.** A sale or reclaim that would move a sub-account is blocked unless
-  every allow-listed fungible-token balance is provably zero. The gate is
-  fail-closed: a failed or unparseable balance query blocks. The fungible-token
-  allowlist is bounded (16 entries) so the per-token balance fan-out stays within
-  the gas limit; raising the bound requires re-validating the gas budget.
-- **Refunds.** All refunds are pull-based (`claim_refund`); the contract never
-  pushes funds in a way that can wedge on a failed transfer.
-- **Business namespaces.** Sub-accounts under a Business (licensee-gated) TLA are
-  not resellable; the licensee boundary is preserved across the marketplace.
+Sale settlement takes a per-listing `settling` lock, so two settlements cannot run
+against the same listing at once.
+
+The asset gate blocks any sale or reclaim that would move a sub-account unless every
+allow-listed fungible-token balance reads as provably zero. It is fail-closed: a
+balance query that fails or does not parse blocks the move rather than waving it
+through. The allowlist is capped at 16 so the per-token fan-out stays inside the gas
+limit; raising the cap means re-checking the gas budget first.
+
+Refunds are pull-based through `claim_refund`. The contract never pushes funds in a
+way that could wedge on a failed transfer.
+
+Sub-accounts under a Business (licensee-gated) TLA are not resellable, so the
+licensee boundary the rent path enforces is not lost on the marketplace.
 
 ## Out of scope
 
-- **Non-fungible tokens.** The asset gate covers fungible tokens only. NFTs are not
-  gated and transfer with the sub-account on a sale or reclaim; a seller is
-  responsible for moving out any NFTs before listing. NFT-aware gating is a future
-  (V2) feature.
-- The vendored `hos-wallet` fork (Defuse `wallet-no-sign`) is audited upstream and
-  pinned by commit; only the added `init` is in scope here.
-- Off-chain components (relay, attestation issuance) are outside this on-chain
-  threat model.
+NFTs are not gated. The asset gate is fungible-token only, so an NFT held by a
+wallet transfers with the sub-account on a sale or reclaim; a seller has to move
+NFTs out before listing. NFT-aware gating is a V2 item.
+
+The vendored `hos-wallet` fork is audited upstream and pinned by commit. Only the
+added `init` is in scope here.
+
+Off-chain pieces (the relay, attestation issuance) sit outside this on-chain model.
