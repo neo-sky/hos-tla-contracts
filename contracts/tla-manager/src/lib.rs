@@ -101,8 +101,13 @@ impl TlaManager {
                 account: account.clone(),
             }
             .emit();
-            let _ = Promise::new(self.registry.clone()).transfer(funding);
-            return PromiseOrValue::Value(MintOutcome::CreationFailed);
+            return PromiseOrValue::Promise(
+                Promise::new(self.registry.clone()).transfer(funding).then(
+                    Self::ext(env::current_account_id())
+                        .with_static_gas(CALLBACK_GAS)
+                        .on_creation_failed(),
+                ),
+            );
         }
         Event::SubAccountMinted {
             account: account.clone(),
@@ -133,6 +138,11 @@ impl TlaManager {
             Event::SignerInstallFailed { account }.emit();
             MintOutcome::SignerPending
         }
+    }
+
+    #[private]
+    pub fn on_creation_failed(&self) -> MintOutcome {
+        MintOutcome::CreationFailed
     }
 
     pub fn retry_install(&mut self, account: AccountId, owner_public_key: PublicKey) -> Promise {
@@ -270,12 +280,23 @@ mod tests {
     fn callback_failure_refunds_registry() {
         let mut c = deploy();
         ctx(MANAGER, 0);
-        let _ = c.on_wallet_created(
+        let out = c.on_wallet_created(
             acc("alice.tla.testnet"),
             owner_key(),
             NearToken::from_millinear(100),
             Err(PromiseError::Failed),
         );
+        assert!(matches!(out, PromiseOrValue::Promise(_)));
+    }
+
+    #[test]
+    fn on_creation_failed_reports_creation_failed() {
+        let c = deploy();
+        ctx(MANAGER, 0);
+        assert!(matches!(
+            c.on_creation_failed(),
+            MintOutcome::CreationFailed
+        ));
     }
 
     #[test]
