@@ -60,7 +60,7 @@ impl TlaManager {
         require!(!name.is_empty() && !name.contains('.'), error::INVALID_NAME);
         require!(
             owner_public_key.curve_type() == CurveType::ED25519,
-            error::NOT_ED25519
+            hos_common::NOT_ED25519
         );
         let funding = env::attached_deposit();
         require!(funding >= self.min_balance, error::INSUFFICIENT_DEPOSIT);
@@ -117,7 +117,10 @@ impl TlaManager {
         PromiseOrValue::Promise(
             ext_active_signer::ext(self.active_signer.clone())
                 .with_static_gas(INSTALL_SIGNER_GAS)
-                .install_signer(account.clone(), ed25519_base58(&owner_public_key))
+                .install_signer(
+                    account.clone(),
+                    hos_common::ed25519_base58_or_panic(&owner_public_key),
+                )
                 .then(
                     Self::ext(env::current_account_id())
                         .with_static_gas(CALLBACK_GAS)
@@ -152,11 +155,14 @@ impl TlaManager {
         );
         require!(
             owner_public_key.curve_type() == CurveType::ED25519,
-            error::NOT_ED25519
+            hos_common::NOT_ED25519
         );
         ext_active_signer::ext(self.active_signer.clone())
             .with_static_gas(INSTALL_SIGNER_GAS)
-            .install_signer(account, ed25519_base58(&owner_public_key))
+            .install_signer(
+                account,
+                hos_common::ed25519_base58_or_panic(&owner_public_key),
+            )
     }
 
     pub fn registry(&self) -> &AccountId {
@@ -171,10 +177,6 @@ impl TlaManager {
             self.min_balance,
         )
     }
-}
-
-fn ed25519_base58(key: &PublicKey) -> String {
-    hos_common::ed25519_base58(key).unwrap_or_else(|| env::panic_str(error::NOT_ED25519))
 }
 
 #[cfg(test)]
@@ -297,13 +299,6 @@ mod tests {
             c.on_creation_failed(),
             MintOutcome::CreationFailed
         ));
-    }
-
-    #[test]
-    fn ed25519_base58_strips_curve_prefix() {
-        let raw = ed25519_base58(&owner_key());
-        assert!(!raw.contains(':'));
-        assert_eq!(format!("ed25519:{raw}"), OWNER_KEY);
     }
 
     #[test]

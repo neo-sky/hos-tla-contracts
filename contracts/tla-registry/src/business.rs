@@ -185,4 +185,15 @@ impl TlaRegistry {
             self.business_sub_count.insert(tla_id.clone(), next);
         }
     }
+
+    pub(crate) fn business_count_decrement_if_business(&mut self, tla_id: &AccountId) {
+        let is_business = self
+            .tlas
+            .get(tla_id)
+            .map(|t| t.tla_type == TlaType::Business)
+            .unwrap_or(false);
+        if is_business {
+            self.business_count_decrement(tla_id);
+        }
+    }
 }

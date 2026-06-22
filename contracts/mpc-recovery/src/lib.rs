@@ -381,7 +381,7 @@ impl MpcRecovery {
         round: u64,
         #[callback_result] result: Result<(), PromiseError>,
     ) {
-        if self.settle_resolution(&account, round, result.is_ok()) {
+        if self.settle_resolving(&account, round, result.is_ok()) && result.is_ok() {
             Event::Aborted { account, round }.emit();
         }
     }
@@ -394,7 +394,7 @@ impl MpcRecovery {
         signed_tx_hash: String,
         #[callback_result] mpc_signature: Result<Value, PromiseError>,
     ) -> Option<RecoveryResult> {
-        let reverted = self.revert_to_approved(&account, round);
+        let reverted = self.settle_resolving(&account, round, false);
         match mpc_signature {
             Ok(mpc_signature) if reverted => {
                 Event::NativeSignatureProduced { account, round }.emit();
@@ -439,13 +439,9 @@ impl MpcRecovery {
     }
 
     pub fn pending_target(&self, account: AccountId) -> Option<String> {
-        self.accounts.get(&account).and_then(|a| match &a.phase {
-            Phase::Requested { new_owner, .. }
-            | Phase::Approving { new_owner, .. }
-            | Phase::Approved { new_owner, .. }
-            | Phase::Resolving { new_owner, .. } => Some(new_owner.to_string()),
-            Phase::Idle => None,
-        })
+        self.accounts
+            .get(&account)
+            .and_then(|a| a.phase.pending().map(|(key, _)| key.to_string()))
     }
 
     pub fn expected_native_path(&self, account: AccountId) -> String {
@@ -500,38 +496,19 @@ impl MpcRecovery {
             )
     }
 
-    fn revert_to_approved(&mut self, account: &AccountId, round: u64) -> bool {
+    fn settle_resolving(&mut self, account: &AccountId, round: u64, done: bool) -> bool {
         let Some(entry) = self.accounts.get_mut(account) else {
             return false;
         };
-        let new_owner = match &entry.phase {
-            Phase::Resolving {
-                new_owner,
-                round: resolving_round,
-            } if *resolving_round == round => new_owner.clone(),
-            _ => return false,
-        };
-        entry.phase = Phase::Approved { new_owner, round };
-        true
-    }
-
-    fn settle_resolution(&mut self, account: &AccountId, round: u64, success: bool) -> bool {
-        let Some(entry) = self.accounts.get_mut(account) else {
+        let Some(new_owner) = entry.phase.resolving_owner(round) else {
             return false;
         };
-        let new_owner = match &entry.phase {
-            Phase::Resolving {
-                new_owner,
-                round: resolving_round,
-            } if *resolving_round == round => new_owner.clone(),
-            _ => return false,
-        };
-        if success {
-            entry.phase = Phase::Idle;
+        entry.phase = if done {
+            Phase::Idle
         } else {
-            entry.phase = Phase::Approved { new_owner, round };
-        }
-        success
+            Phase::Approved { new_owner, round }
+        };
+        true
     }
 }
 
@@ -555,8 +532,8 @@ fn swap_owner(
         "swap_owner",
         json!({
             "wallet": account,
-            "new_public_key": ed25519_base58(new_owner),
-            "expected_current": ed25519_base58(bound_owner),
+            "new_public_key": hos_common::ed25519_base58_or_panic(new_owner),
+            "expected_current": hos_common::ed25519_base58_or_panic(bound_owner),
         }),
         SWAP_GAS,
     )
@@ -566,7 +543,7 @@ fn freeze(active_signer: AccountId, account: &AccountId, bound_owner: &PublicKey
     call_signer(
         active_signer,
         "freeze",
-        json!({ "wallet": account, "expected_current": ed25519_base58(bound_owner) }),
+        json!({ "wallet": account, "expected_current": hos_common::ed25519_base58_or_panic(bound_owner) }),
         FREEZE_GAS,
     )
 }
@@ -578,10 +555,6 @@ fn unfreeze(active_signer: AccountId, account: &AccountId) -> Promise {
         json!({ "wallet": account }),
         FREEZE_GAS,
     )
-}
-
-fn ed25519_base58(key: &PublicKey) -> String {
-    hos_common::ed25519_base58(key).unwrap_or_else(|| env::panic_str(error::NOT_ED25519))
 }
 
 fn native_path(account: &AccountId) -> String {

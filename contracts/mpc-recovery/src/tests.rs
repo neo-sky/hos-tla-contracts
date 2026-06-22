@@ -285,14 +285,6 @@ fn finalize_rejected_without_approval() {
 }
 
 #[test]
-fn ed25519_base58_strips_curve_prefix() {
-    let (_, pk) = keypair();
-    let raw = ed25519_base58(&pk);
-    assert!(!raw.contains(':'));
-    assert_eq!(format!("ed25519:{raw}"), pk.to_string());
-}
-
-#[test]
 fn wallet_verdict_approves_and_freezes() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();

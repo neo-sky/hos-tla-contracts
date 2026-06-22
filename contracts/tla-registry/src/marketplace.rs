@@ -1,8 +1,8 @@
-use crate::asset_gate::{ft_balances_clear, BalanceGate};
+use crate::asset_gate::{ft_balance_fanout, ft_balances_clear, BalanceGate};
 use crate::error::ContractError;
 use crate::events::Event;
 use crate::fees;
-use crate::interfaces::{ext_ft, ext_hos_extension};
+use crate::interfaces::ext_hos_extension;
 use crate::mother::effective_sub_lifecycle;
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
@@ -12,7 +12,6 @@ use near_sdk::{env, near, AccountId, Gas, Promise, PromiseOrValue, PublicKey};
 
 const GAS_FOR_FORCE_TRANSFER: Gas = Gas::from_tgas(45);
 const GAS_FOR_SOLD_CALLBACK: Gas = Gas::from_tgas(20);
-const GAS_FOR_FT_BALANCE: Gas = Gas::from_tgas(5);
 const GAS_FOR_BUY_BALANCES_CB: Gas = Gas::from_tgas(85);
 
 #[derive(Serialize, Deserialize)]
@@ -25,6 +24,7 @@ pub struct PendingBuy {
     pub price: U128,
     pub deposit: U128,
     pub owner_key: PublicKey,
+    pub sub_account: AccountId,
 }
 
 #[near]
@@ -182,25 +182,12 @@ impl TlaRegistry {
             price: U128(price),
             deposit: U128(deposit),
             owner_key,
+            sub_account,
         };
         let allowlist: Vec<AccountId> = self.ft_allowlist.iter().cloned().collect();
-        if allowlist.is_empty() {
-            return Ok(settle_transfer(
-                &self.hos_extension,
-                &sub_account,
-                settlement,
-            ));
-        }
-        let mut chain = ext_ft::ext(allowlist[0].clone())
-            .with_static_gas(GAS_FOR_FT_BALANCE)
-            .ft_balance_of(sub_account.clone());
-        for ft in allowlist.iter().skip(1) {
-            chain = chain.and(
-                ext_ft::ext(ft.clone())
-                    .with_static_gas(GAS_FOR_FT_BALANCE)
-                    .ft_balance_of(sub_account.clone()),
-            );
-        }
+        let Some(chain) = ft_balance_fanout(&allowlist, &settlement.sub_account) else {
+            return Ok(settle_transfer(&self.hos_extension, settlement));
+        };
         Ok(chain.then(
             Self::ext(env::current_account_id())
                 .with_static_gas(GAS_FOR_BUY_BALANCES_CB)
@@ -270,14 +257,7 @@ impl TlaRegistry {
         if let BalanceGate::Blocked { token, reason } = ft_balances_clear(&allowlist) {
             return self.abort_sale(&key, &settlement, &token, &reason);
         }
-        match key.parse::<AccountId>() {
-            Ok(sub_account) => PromiseOrValue::Promise(settle_transfer(
-                &self.hos_extension,
-                &sub_account,
-                settlement,
-            )),
-            Err(_) => self.abort_sale(&key, &settlement, "", "invalid_sub_account_id"),
-        }
+        PromiseOrValue::Promise(settle_transfer(&self.hos_extension, settlement))
     }
 
     pub fn get_listing(&self, tla_id: AccountId, name: String) -> Option<ListingView> {
@@ -431,15 +411,11 @@ impl TlaRegistry {
     }
 }
 
-fn settle_transfer(
-    hos_extension: &AccountId,
-    sub_account: &AccountId,
-    settlement: PendingBuy,
-) -> Promise {
+fn settle_transfer(hos_extension: &AccountId, settlement: PendingBuy) -> Promise {
     ext_hos_extension::ext(hos_extension.clone())
         .with_static_gas(GAS_FOR_FORCE_TRANSFER)
         .force_transfer(
-            sub_account.clone(),
+            settlement.sub_account.clone(),
             settlement.new_owner_key,
             Some(settlement.owner_key),
         )

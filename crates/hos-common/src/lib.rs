@@ -1,7 +1,18 @@
 use near_sdk::serde::{Deserialize, Serialize};
-use near_sdk::{CurveType, PublicKey};
+use near_sdk::{env, CurveType, PublicKey};
 
 pub const FT_STORAGE_DEPOSIT_YOCTO: u128 = 1_250_000_000_000_000_000_000;
+pub const NOT_ED25519: &str = "owner key must be ed25519";
+
+pub fn ed25519_base58_or_panic(key: &PublicKey) -> String {
+    ed25519_base58(key).unwrap_or_else(|| env::panic_str(NOT_ED25519))
+}
+
+pub fn panic_json<T: Serialize>(err: &T) -> ! {
+    let json = near_sdk::serde_json::to_string(err)
+        .unwrap_or_else(|_| String::from(r#"{"code":"serialization_failure"}"#));
+    env::panic_str(&json)
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(crate = "near_sdk::serde")]

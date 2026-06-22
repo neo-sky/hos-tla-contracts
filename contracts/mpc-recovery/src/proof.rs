@@ -3,18 +3,28 @@ use near_sdk::{env, AccountId, PublicKey};
 const DOMAIN_REQUEST: u8 = 1;
 const DOMAIN_VERDICT: u8 = 2;
 
+fn message_core(
+    domain: u8,
+    contract: &AccountId,
+    account: &AccountId,
+    new_owner: &PublicKey,
+    round: u64,
+) -> Vec<u8> {
+    let mut m = vec![domain];
+    push_str(&mut m, contract.as_str());
+    push_str(&mut m, account.as_str());
+    m.extend_from_slice(new_owner.as_bytes());
+    m.extend_from_slice(&round.to_le_bytes());
+    m
+}
+
 pub fn request_message(
     contract: &AccountId,
     account: &AccountId,
     new_owner: &PublicKey,
     round: u64,
 ) -> Vec<u8> {
-    let mut m = vec![DOMAIN_REQUEST];
-    push_str(&mut m, contract.as_str());
-    push_str(&mut m, account.as_str());
-    m.extend_from_slice(new_owner.as_bytes());
-    m.extend_from_slice(&round.to_le_bytes());
-    m
+    message_core(DOMAIN_REQUEST, contract, account, new_owner, round)
 }
 
 pub fn verdict_message(
@@ -24,11 +34,7 @@ pub fn verdict_message(
     round: u64,
     silent: bool,
 ) -> Vec<u8> {
-    let mut m = vec![DOMAIN_VERDICT];
-    push_str(&mut m, contract.as_str());
-    push_str(&mut m, account.as_str());
-    m.extend_from_slice(new_owner.as_bytes());
-    m.extend_from_slice(&round.to_le_bytes());
+    let mut m = message_core(DOMAIN_VERDICT, contract, account, new_owner, round);
     m.push(silent as u8);
     m
 }

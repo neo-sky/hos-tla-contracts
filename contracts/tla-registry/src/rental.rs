@@ -1,20 +1,32 @@
-use crate::asset_gate::{ft_balances_clear, BalanceGate};
+use crate::asset_gate::{ft_balance_fanout, ft_balances_clear, BalanceGate};
 use crate::error::ContractError;
 use crate::events::Event;
 use crate::fees;
-use crate::interfaces::{ext_ft, ext_hos_extension, ext_tla_manager};
+use crate::interfaces::{ext_hos_extension, ext_tla_manager};
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
 use near_sdk::json_types::U128;
+use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{
     env, is_promise_success, near, AccountId, Gas, NearToken, Promise, PromiseOrValue, PublicKey,
 };
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "near_sdk::serde")]
+pub struct PendingReRent {
+    pub tla_id: AccountId,
+    pub name: String,
+    pub payer: AccountId,
+    pub owner_key: PublicKey,
+    pub rent: U128,
+    pub attached: U128,
+    pub sub_account: AccountId,
+}
 
 const GAS_FOR_CREATE: Gas = Gas::from_tgas(90);
 const GAS_FOR_CALLBACK: Gas = Gas::from_tgas(15);
 const GAS_FOR_RERENT_FORCE: Gas = Gas::from_tgas(45);
 const GAS_FOR_RETRY_INSTALL: Gas = Gas::from_tgas(20);
-const GAS_FOR_FT_BALANCE: Gas = Gas::from_tgas(5);
 const GAS_FOR_RERENT_BALANCES_CB: Gas = Gas::from_tgas(85);
 
 #[near]
@@ -142,41 +154,23 @@ impl TlaRegistry {
             let sub_account: AccountId = key
                 .parse()
                 .map_err(|_| ContractError::InvalidSubAccountId)?;
+            let pending = PendingReRent {
+                tla_id,
+                name,
+                payer: caller,
+                owner_key,
+                rent: U128(rent),
+                attached: U128(attached.as_yoctonear()),
+                sub_account,
+            };
             let allowlist: Vec<AccountId> = self.ft_allowlist.iter().cloned().collect();
-            if allowlist.is_empty() {
-                return Ok(re_rent_transfer(
-                    &self.hos_extension,
-                    sub_account,
-                    owner_key,
-                    tla_id,
-                    name,
-                    caller,
-                    rent,
-                    attached.as_yoctonear(),
-                ));
-            }
-            let mut chain = ext_ft::ext(allowlist[0].clone())
-                .with_static_gas(GAS_FOR_FT_BALANCE)
-                .ft_balance_of(sub_account.clone());
-            for ft in allowlist.iter().skip(1) {
-                chain = chain.and(
-                    ext_ft::ext(ft.clone())
-                        .with_static_gas(GAS_FOR_FT_BALANCE)
-                        .ft_balance_of(sub_account.clone()),
-                );
-            }
+            let Some(chain) = ft_balance_fanout(&allowlist, &pending.sub_account) else {
+                return Ok(re_rent_transfer(&self.hos_extension, pending));
+            };
             Ok(chain.then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_FOR_RERENT_BALANCES_CB)
-                    .on_re_rent_balances_checked(
-                        tla_id,
-                        name,
-                        caller,
-                        owner_key,
-                        U128(rent),
-                        U128(attached.as_yoctonear()),
-                        allowlist,
-                    ),
+                    .on_re_rent_balances_checked(pending, allowlist),
             ))
         } else {
             let creation_deposit =
@@ -396,25 +390,19 @@ impl TlaRegistry {
         Event::SignerInstalled { full_name: key }.emit();
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[private]
     pub fn on_re_rent_balances_checked(
         &mut self,
-        tla_id: AccountId,
-        name: String,
-        payer: AccountId,
-        owner_key: PublicKey,
-        rent_yocto: U128,
-        attached_yocto: U128,
+        pending: PendingReRent,
         allowlist: Vec<AccountId>,
     ) -> PromiseOrValue<()> {
-        let key = sub_account_key(&tla_id, &name);
+        let key = sub_account_key(&pending.tla_id, &pending.name);
         if let BalanceGate::Blocked { token, reason } = ft_balances_clear(&allowlist) {
             self.settle_failed_mint(
                 &key,
-                &tla_id,
-                &payer,
-                attached_yocto,
+                &pending.tla_id,
+                &pending.payer,
+                pending.attached,
                 "re-rent blocked by asset gate",
             );
             Event::SubAccountSaleBlocked {
@@ -425,49 +413,23 @@ impl TlaRegistry {
             .emit();
             return PromiseOrValue::Value(());
         }
-        let sub_account: AccountId = match key.parse() {
-            Ok(a) => a,
-            Err(_) => {
-                self.settle_failed_mint(
-                    &key,
-                    &tla_id,
-                    &payer,
-                    attached_yocto,
-                    "invalid sub-account id",
-                );
-                return PromiseOrValue::Value(());
-            }
-        };
-        PromiseOrValue::Promise(re_rent_transfer(
-            &self.hos_extension,
-            sub_account,
-            owner_key,
-            tla_id,
-            name,
-            payer,
-            rent_yocto.0,
-            attached_yocto.0,
-        ))
+        PromiseOrValue::Promise(re_rent_transfer(&self.hos_extension, pending))
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn re_rent_transfer(
-    hos_extension: &AccountId,
-    sub_account: AccountId,
-    owner_key: PublicKey,
-    tla_id: AccountId,
-    name: String,
-    payer: AccountId,
-    rent: u128,
-    attached: u128,
-) -> Promise {
+fn re_rent_transfer(hos_extension: &AccountId, pending: PendingReRent) -> Promise {
     ext_hos_extension::ext(hos_extension.clone())
         .with_static_gas(GAS_FOR_RERENT_FORCE)
-        .force_transfer(sub_account, owner_key, None)
+        .force_transfer(pending.sub_account, pending.owner_key, None)
         .then(
             TlaRegistry::ext(env::current_account_id())
                 .with_static_gas(GAS_FOR_CALLBACK)
-                .on_sub_account_re_rented(tla_id, name, payer, U128(rent), U128(attached)),
+                .on_sub_account_re_rented(
+                    pending.tla_id,
+                    pending.name,
+                    pending.payer,
+                    pending.rent,
+                    pending.attached,
+                ),
         )
 }

@@ -129,14 +129,7 @@ impl TlaRegistry {
         reason: &str,
     ) {
         self.sub_accounts.remove(key);
-        let is_business = self
-            .tlas
-            .get(tla_id)
-            .map(|t| t.tla_type == TlaType::Business)
-            .unwrap_or(false);
-        if is_business {
-            self.business_count_decrement(tla_id);
-        }
+        self.business_count_decrement_if_business(tla_id);
         self.add_pending_refund(payer, attached.0);
         Event::RefundPending {
             account: payer.clone(),

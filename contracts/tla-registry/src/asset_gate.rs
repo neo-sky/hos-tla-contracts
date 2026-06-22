@@ -1,11 +1,28 @@
+use crate::interfaces::ext_ft;
 use near_sdk::json_types::U128;
-use near_sdk::{env, AccountId, PromiseError};
+use near_sdk::{env, AccountId, Gas, Promise, PromiseError};
 
 const FT_BALANCE_MAX_LEN: usize = 256;
+const GAS_PER_FT_BALANCE: Gas = Gas::from_tgas(5);
 
 pub enum BalanceGate {
     Clear,
     Blocked { token: String, reason: String },
+}
+
+pub fn ft_balance_fanout(allowlist: &[AccountId], sub_account: &AccountId) -> Option<Promise> {
+    let (first, rest) = allowlist.split_first()?;
+    let mut chain = ext_ft::ext(first.clone())
+        .with_static_gas(GAS_PER_FT_BALANCE)
+        .ft_balance_of(sub_account.clone());
+    for ft in rest {
+        chain = chain.and(
+            ext_ft::ext(ft.clone())
+                .with_static_gas(GAS_PER_FT_BALANCE)
+                .ft_balance_of(sub_account.clone()),
+        );
+    }
+    Some(chain)
 }
 
 pub fn ft_balances_clear(allowlist: &[AccountId]) -> BalanceGate {

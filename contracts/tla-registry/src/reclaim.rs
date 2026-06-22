@@ -1,7 +1,7 @@
-use crate::asset_gate::{ft_balances_clear, BalanceGate};
+use crate::asset_gate::{ft_balance_fanout, ft_balances_clear, BalanceGate};
 use crate::error::ContractError;
 use crate::events::Event;
-use crate::interfaces::{ext_ft, ext_hos_extension};
+use crate::interfaces::ext_hos_extension;
 use crate::mother::effective_sub_lifecycle;
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
@@ -10,7 +10,6 @@ use near_sdk::{env, is_promise_success, near, AccountId, Gas, NearToken, Promise
 const GAS_FOR_HOS_SWEEP: Gas = Gas::from_tgas(120);
 const GAS_FOR_HOS_FORCE_TRANSFER: Gas = Gas::from_tgas(45);
 const GAS_FOR_FINALIZE_CB: Gas = Gas::from_tgas(10);
-const GAS_FOR_BALANCE_QUERY: Gas = Gas::from_tgas(5);
 const GAS_FOR_BALANCES_CB_TOTAL: Gas = Gas::from_tgas(80);
 
 const SWEEP_ATTACHED_REQUIRED: NearToken =
@@ -55,22 +54,9 @@ impl TlaRegistry {
         let (sub_account, destination) = self.resolve_reclaimable(&tla_id, &key)?;
 
         let allowlist: Vec<AccountId> = self.ft_allowlist.iter().cloned().collect();
-
-        if allowlist.is_empty() {
+        let Some(chain) = ft_balance_fanout(&allowlist, &sub_account) else {
             return Ok(self.park_wallet(sub_account, tla_id, name, destination));
-        }
-
-        let mut chain = ext_ft::ext(allowlist[0].clone())
-            .with_static_gas(GAS_FOR_BALANCE_QUERY)
-            .ft_balance_of(sub_account.clone());
-        for ft in allowlist.iter().skip(1) {
-            chain = chain.and(
-                ext_ft::ext(ft.clone())
-                    .with_static_gas(GAS_FOR_BALANCE_QUERY)
-                    .ft_balance_of(sub_account.clone()),
-            );
-        }
-
+        };
         Ok(chain.then(
             Self::ext(env::current_account_id())
                 .with_static_gas(GAS_FOR_BALANCES_CB_TOTAL)
@@ -143,14 +129,7 @@ impl TlaRegistry {
         self.listings.remove(&key);
         self.accepted_offers.remove(&key);
         self.sub_account_count = self.sub_account_count.saturating_sub(1);
-        let is_business = self
-            .tlas
-            .get(&tla_id)
-            .map(|t| t.tla_type == TlaType::Business)
-            .unwrap_or(false);
-        if is_business {
-            self.business_count_decrement(&tla_id);
-        }
+        self.business_count_decrement_if_business(&tla_id);
         let now = env::block_timestamp();
         self.parked_names.insert(
             key.clone(),

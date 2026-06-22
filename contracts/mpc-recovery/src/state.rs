@@ -42,6 +42,30 @@ pub enum Phase {
     },
 }
 
+impl Phase {
+    pub fn pending(&self) -> Option<(&PublicKey, u64)> {
+        match self {
+            Phase::Requested {
+                new_owner, round, ..
+            }
+            | Phase::Approving { new_owner, round }
+            | Phase::Approved { new_owner, round }
+            | Phase::Resolving { new_owner, round } => Some((new_owner, *round)),
+            Phase::Idle => None,
+        }
+    }
+
+    pub fn resolving_owner(&self, round: u64) -> Option<PublicKey> {
+        match self {
+            Phase::Resolving {
+                new_owner,
+                round: resolving_round,
+            } if *resolving_round == round => Some(new_owner.clone()),
+            _ => None,
+        }
+    }
+}
+
 #[near(serializers = [borsh])]
 pub struct Account {
     pub policy: Policy,
