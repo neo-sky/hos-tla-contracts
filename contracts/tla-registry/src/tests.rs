@@ -390,7 +390,7 @@ mod rental {
         rent_alice_sub_pending(&mut c, "alice");
         ctx(ALICE, 1, 2);
         assert!(matches!(
-            c.list_sub_account(acc(TLA), "alice".to_string(), U128(10)),
+            c.list_sub_account(acc(TLA), "alice".to_string(), U128(10), parked_key()),
             Err(ContractError::SubAccountNotSellable)
         ));
     }
@@ -449,7 +449,7 @@ mod marketplace {
 
     fn list_alice(c: &mut TlaRegistry, price: u128) {
         ctx(ALICE, 1, 2);
-        c.list_sub_account(acc(TLA), "alice".to_string(), U128(price))
+        c.list_sub_account(acc(TLA), "alice".to_string(), U128(price), parked_key())
             .unwrap();
     }
 
@@ -459,7 +459,7 @@ mod marketplace {
         rent_alice_sub(&mut c, "alice");
         ctx(BOB, 1, 2);
         assert!(matches!(
-            c.list_sub_account(acc(TLA), "alice".to_string(), U128(10)),
+            c.list_sub_account(acc(TLA), "alice".to_string(), U128(10), parked_key()),
             Err(ContractError::OnlyOwner)
         ));
     }
@@ -487,7 +487,7 @@ mod marketplace {
         rent_alice_sub(&mut c, "alice");
         ctx(ALICE, 1, 2);
         assert!(matches!(
-            c.list_sub_account(acc(TLA), "alice".to_string(), U128(0)),
+            c.list_sub_account(acc(TLA), "alice".to_string(), U128(0), parked_key()),
             Err(ContractError::InvalidPrice)
         ));
     }
@@ -547,6 +547,7 @@ mod marketplace {
             acc(BOB),
             U128(100),
             U128(120),
+            Ok(true),
         );
         assert_eq!(c.get_pending_refund(acc(ALICE)).0, 95);
         assert_eq!(c.get_pending_refund(acc(BOB)).0, 20);
@@ -571,6 +572,35 @@ mod marketplace {
             acc(BOB),
             U128(100),
             U128(100),
+            Err(near_sdk::PromiseError::Failed),
+        );
+        assert_eq!(c.get_pending_refund(acc(BOB)).0, 100);
+        assert_eq!(
+            c.get_sub_account(acc(TLA), "alice".to_string())
+                .unwrap()
+                .owner,
+            acc(ALICE)
+        );
+        ctx(ALICE, 1, 2);
+        c.unlist_sub_account(acc(TLA), "alice".to_string()).unwrap();
+    }
+
+    #[test]
+    fn voided_swap_refunds_buyer_and_unlocks() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        list_alice(&mut c, 100);
+        ctx(BOB, 100, 2);
+        let _ = c
+            .buy_sub_account(acc(TLA), "alice".to_string(), parked_key())
+            .unwrap();
+        c.on_sub_account_sold(
+            acc(TLA),
+            "alice".to_string(),
+            acc(BOB),
+            U128(100),
+            U128(100),
+            Ok(false),
         );
         assert_eq!(c.get_pending_refund(acc(BOB)).0, 100);
         assert_eq!(
@@ -588,8 +618,14 @@ mod marketplace {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
         ctx(ALICE, 1, 2);
-        c.accept_offer(acc(TLA), "alice".to_string(), acc(BOB), U128(50))
-            .unwrap();
+        c.accept_offer(
+            acc(TLA),
+            "alice".to_string(),
+            acc(BOB),
+            U128(50),
+            parked_key(),
+        )
+        .unwrap();
         ctx(BOB, 50, 2);
         let _ = c
             .buy_sub_account(acc(TLA), "alice".to_string(), parked_key())
@@ -607,7 +643,7 @@ mod marketplace {
         c.set_mother(acc(&sub)).unwrap();
         ctx(ALICE, 1, 2);
         assert!(matches!(
-            c.list_sub_account(acc(TLA), "alice".to_string(), U128(10)),
+            c.list_sub_account(acc(TLA), "alice".to_string(), U128(10), parked_key()),
             Err(ContractError::SubAccountIsMother)
         ));
     }
@@ -848,7 +884,7 @@ mod business {
         rent_business_sub(&mut c, "staff");
         ctx(ALICE, 1, 2);
         assert!(matches!(
-            c.list_sub_account(acc(TLA), "staff".to_string(), U128(10)),
+            c.list_sub_account(acc(TLA), "staff".to_string(), U128(10), parked_key()),
             Err(ContractError::BusinessSubNotResellable)
         ));
     }
@@ -870,7 +906,13 @@ mod business {
         rent_business_sub(&mut c, "staff");
         ctx(ALICE, 1, 2);
         assert!(matches!(
-            c.accept_offer(acc(TLA), "staff".to_string(), acc(BOB), U128(10)),
+            c.accept_offer(
+                acc(TLA),
+                "staff".to_string(),
+                acc(BOB),
+                U128(10),
+                parked_key()
+            ),
             Err(ContractError::BusinessSubNotResellable)
         ));
     }

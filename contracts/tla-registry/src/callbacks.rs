@@ -121,7 +121,7 @@ impl TlaRegistry {
         }
     }
 
-    fn settle_failed_mint(
+    pub(crate) fn settle_failed_mint(
         &mut self,
         key: &str,
         tla_id: &AccountId,

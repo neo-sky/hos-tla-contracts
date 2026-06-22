@@ -629,7 +629,7 @@ fn native_finalize_signs_and_resolves() {
         c.accounts.get(&account_id()).unwrap().phase,
         Phase::Approved { .. }
     ));
-    ctx("anyone.testnet", 61 * NS_PER_SEC, 6);
+    ctx(OWNER, 61 * NS_PER_SEC, 6);
     let _ = c.finalize_recovery(account_id(), U64(1), block_hash());
     assert!(matches!(
         c.accounts.get(&account_id()).unwrap().phase,
@@ -638,13 +638,13 @@ fn native_finalize_signs_and_resolves() {
 }
 
 #[test]
-fn native_on_signed_success_resolves_to_idle() {
+fn native_signature_keeps_round_until_owner_claims() {
     let (w1, wk1) = keypair();
     let (mother, mother_pk) = keypair();
     let mut c = deploy(&[wk1.clone()], 1);
     install(&mut c, mother_pk);
     approve_native_recovery(&mut c, &mother, &w1, wk1);
-    ctx("anyone.testnet", 61 * NS_PER_SEC, 6);
+    ctx(OWNER, 61 * NS_PER_SEC, 6);
     let _ = c.finalize_recovery(account_id(), U64(1), block_hash());
     let out = c.on_signed(
         account_id(),
@@ -655,7 +655,36 @@ fn native_on_signed_success_resolves_to_idle() {
     assert!(out.is_some());
     assert!(matches!(
         c.accounts.get(&account_id()).unwrap().phase,
+        Phase::Approved { .. }
+    ));
+    ctx(OWNER, 62 * NS_PER_SEC, 7);
+    c.claim_native_finalized(account_id(), U64(0));
+    assert!(matches!(
+        c.accounts.get(&account_id()).unwrap().phase,
         Phase::Idle
+    ));
+}
+
+#[test]
+fn native_finalize_retryable_after_signature() {
+    let (w1, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1.clone()], 1);
+    install(&mut c, mother_pk);
+    approve_native_recovery(&mut c, &mother, &w1, wk1);
+    ctx(OWNER, 61 * NS_PER_SEC, 6);
+    let _ = c.finalize_recovery(account_id(), U64(1), block_hash());
+    let _ = c.on_signed(
+        account_id(),
+        0,
+        "ab".to_string(),
+        Ok(json!({"signature": "stub"})),
+    );
+    ctx(OWNER, 62 * NS_PER_SEC, 7);
+    let _ = c.finalize_recovery(account_id(), U64(2), block_hash());
+    assert!(matches!(
+        c.accounts.get(&account_id()).unwrap().phase,
+        Phase::Resolving { .. }
     ));
 }
 
@@ -666,7 +695,7 @@ fn native_on_signed_failure_restores_approved() {
     let mut c = deploy(&[wk1.clone()], 1);
     install(&mut c, mother_pk);
     approve_native_recovery(&mut c, &mother, &w1, wk1);
-    ctx("anyone.testnet", 61 * NS_PER_SEC, 6);
+    ctx(OWNER, 61 * NS_PER_SEC, 6);
     let _ = c.finalize_recovery(account_id(), U64(1), block_hash());
     let out = c.on_signed(account_id(), 0, "ab".to_string(), Err(PromiseError::Failed));
     assert!(out.is_none());
@@ -674,4 +703,114 @@ fn native_on_signed_failure_restores_approved() {
         c.accounts.get(&account_id()).unwrap().phase,
         Phase::Approved { .. }
     ));
+}
+
+#[test]
+#[should_panic(expected = "only owner")]
+fn native_finalize_rejects_non_owner() {
+    let (w1, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1.clone()], 1);
+    install(&mut c, mother_pk);
+    approve_native_recovery(&mut c, &mother, &w1, wk1);
+    ctx("attacker.testnet", 61 * NS_PER_SEC, 6);
+    let _ = c.finalize_recovery(account_id(), U64(1), block_hash());
+}
+
+#[test]
+#[should_panic(expected = "only owner")]
+fn native_claim_rejects_non_owner() {
+    let (w1, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1.clone()], 1);
+    install(&mut c, mother_pk);
+    approve_native_recovery(&mut c, &mother, &w1, wk1);
+    ctx(OWNER, 61 * NS_PER_SEC, 6);
+    let _ = c.finalize_recovery(account_id(), U64(1), block_hash());
+    let _ = c.on_signed(
+        account_id(),
+        0,
+        "ab".to_string(),
+        Ok(json!({"signature": "stub"})),
+    );
+    ctx("attacker.testnet", 62 * NS_PER_SEC, 7);
+    c.claim_native_finalized(account_id(), U64(0));
+}
+
+#[test]
+#[should_panic(expected = "policy is not a native-recovery policy")]
+fn claim_rejects_wallet_policy() {
+    let (w1, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1.clone()], 1);
+    install_wallet(&mut c, mother_pk);
+    approve_wallet_recovery(&mut c, &mother, &w1, wk1);
+    ctx(OWNER, 0, 6);
+    c.claim_native_finalized(account_id(), U64(0));
+}
+
+#[test]
+#[should_panic(expected = "recovery not approved")]
+fn native_claim_rejects_wrong_round() {
+    let (w1, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1.clone()], 1);
+    install(&mut c, mother_pk);
+    approve_native_recovery(&mut c, &mother, &w1, wk1);
+    ctx(OWNER, 61 * NS_PER_SEC, 6);
+    let _ = c.finalize_recovery(account_id(), U64(1), block_hash());
+    let _ = c.on_signed(
+        account_id(),
+        0,
+        "ab".to_string(),
+        Ok(json!({"signature": "stub"})),
+    );
+    ctx(OWNER, 62 * NS_PER_SEC, 7);
+    c.claim_native_finalized(account_id(), U64(5));
+}
+
+#[test]
+fn reinstall_preserves_round_when_idle() {
+    let (_, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    install(&mut c, mother_pk);
+    let (_, new_owner) = keypair();
+    ctx("anyone.testnet", 1, 1);
+    c.request_recovery(
+        account_id(),
+        new_owner.clone(),
+        U64(0),
+        attest(&mother, &new_owner, 0),
+    );
+    ctx(OWNER, 0, 2);
+    let _ = c.abort_recovery(account_id());
+    assert_eq!(c.round_of(account_id()), Some(1));
+    let (_, mother_pk2) = keypair();
+    install(&mut c, mother_pk2);
+    assert_eq!(
+        c.round_of(account_id()),
+        Some(1),
+        "reinstall must preserve the monotonic round, not reset it to 0"
+    );
+}
+
+#[test]
+#[should_panic(expected = "recovery already in progress")]
+fn reinstall_rejected_while_in_flight() {
+    let (_, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    install(&mut c, mother_pk);
+    let (_, new_owner) = keypair();
+    ctx("anyone.testnet", 1, 1);
+    c.request_recovery(
+        account_id(),
+        new_owner.clone(),
+        U64(0),
+        attest(&mother, &new_owner, 0),
+    );
+    let (_, mother_pk2) = keypair();
+    ctx(OWNER, 0, 2);
+    c.install_policy(account_id(), native_target(), mother_pk2, 60);
 }

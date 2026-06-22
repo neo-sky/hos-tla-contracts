@@ -8,12 +8,12 @@ use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
 use near_sdk::json_types::U128;
 use near_sdk::serde::{Deserialize, Serialize};
-use near_sdk::{env, is_promise_success, near, AccountId, Gas, Promise, PromiseOrValue, PublicKey};
+use near_sdk::{env, near, AccountId, Gas, Promise, PromiseOrValue, PublicKey};
 
-const GAS_FOR_FORCE_TRANSFER: Gas = Gas::from_tgas(20);
+const GAS_FOR_FORCE_TRANSFER: Gas = Gas::from_tgas(45);
 const GAS_FOR_SOLD_CALLBACK: Gas = Gas::from_tgas(20);
 const GAS_FOR_FT_BALANCE: Gas = Gas::from_tgas(5);
-const GAS_FOR_BUY_BALANCES_CB: Gas = Gas::from_tgas(60);
+const GAS_FOR_BUY_BALANCES_CB: Gas = Gas::from_tgas(85);
 
 #[derive(Serialize, Deserialize)]
 #[serde(crate = "near_sdk::serde")]
@@ -24,6 +24,7 @@ pub struct PendingBuy {
     pub new_owner_key: PublicKey,
     pub price: U128,
     pub deposit: U128,
+    pub owner_key: PublicKey,
 }
 
 #[near]
@@ -35,6 +36,7 @@ impl TlaRegistry {
         tla_id: AccountId,
         name: String,
         price: U128,
+        owner_key: PublicKey,
     ) -> Result<(), ContractError> {
         crate::assert_one_yocto()?;
         self.assert_not_paused()?;
@@ -52,6 +54,7 @@ impl TlaRegistry {
             Listing {
                 price: price.0,
                 settling: false,
+                owner_key,
             },
         );
         Event::SubAccountListed {
@@ -98,6 +101,7 @@ impl TlaRegistry {
         name: String,
         buyer: AccountId,
         price: U128,
+        owner_key: PublicKey,
     ) -> Result<(), ContractError> {
         crate::assert_one_yocto()?;
         self.assert_not_paused()?;
@@ -116,6 +120,7 @@ impl TlaRegistry {
                 buyer: buyer.clone(),
                 price: price.0,
                 settling: false,
+                owner_key,
             },
         );
         Event::OfferAccepted {
@@ -165,7 +170,7 @@ impl TlaRegistry {
         self.assert_sellable(&key, &tla_id)?;
         let buyer = env::predecessor_account_id();
         let deposit = env::attached_deposit().as_yoctonear();
-        let price = self.resolve_and_lock_sale(&key, &buyer, deposit)?;
+        let (price, owner_key) = self.resolve_and_lock_sale(&key, &buyer, deposit)?;
         let sub_account: AccountId = key
             .parse()
             .map_err(|_| ContractError::InvalidSubAccountId)?;
@@ -176,6 +181,7 @@ impl TlaRegistry {
             new_owner_key,
             price: U128(price),
             deposit: U128(deposit),
+            owner_key,
         };
         let allowlist: Vec<AccountId> = self.ft_allowlist.iter().cloned().collect();
         if allowlist.is_empty() {
@@ -210,9 +216,10 @@ impl TlaRegistry {
         buyer: AccountId,
         price: U128,
         deposit: U128,
+        #[callback_result] swapped: Result<bool, near_sdk::PromiseError>,
     ) {
         let key = sub_account_key(&tla_id, &name);
-        if !is_promise_success() {
+        if !matches!(swapped, Ok(true)) {
             self.add_pending_refund(&buyer, deposit.0);
             self.clear_settling(&key);
             Event::SubAccountSaleFailed {
@@ -364,12 +371,12 @@ impl TlaRegistry {
         key: &str,
         buyer: &AccountId,
         deposit: u128,
-    ) -> Result<u128, ContractError> {
+    ) -> Result<(u128, PublicKey), ContractError> {
         let offer_terms = self
             .accepted_offers
             .get(key)
-            .map(|o| (o.buyer.clone(), o.price));
-        if let Some((offer_buyer, offer_price)) = offer_terms {
+            .map(|o| (o.buyer.clone(), o.price, o.owner_key.clone()));
+        if let Some((offer_buyer, offer_price, owner_key)) = offer_terms {
             if &offer_buyer == buyer {
                 if deposit < offer_price {
                     return Err(ContractError::PriceNotMet);
@@ -377,18 +384,21 @@ impl TlaRegistry {
                 if let Some(offer) = self.accepted_offers.get_mut(key) {
                     offer.settling = true;
                 }
-                return Ok(offer_price);
+                return Ok((offer_price, owner_key));
             }
         }
-        let listing_price = self.listings.get(key).map(|l| l.price);
-        if let Some(listing_price) = listing_price {
+        let listing_terms = self
+            .listings
+            .get(key)
+            .map(|l| (l.price, l.owner_key.clone()));
+        if let Some((listing_price, owner_key)) = listing_terms {
             if deposit < listing_price {
                 return Err(ContractError::PriceNotMet);
             }
             if let Some(listing) = self.listings.get_mut(key) {
                 listing.settling = true;
             }
-            return Ok(listing_price);
+            return Ok((listing_price, owner_key));
         }
         Err(ContractError::NotListed)
     }
@@ -428,7 +438,11 @@ fn settle_transfer(
 ) -> Promise {
     ext_hos_extension::ext(hos_extension.clone())
         .with_static_gas(GAS_FOR_FORCE_TRANSFER)
-        .force_transfer(sub_account.clone(), settlement.new_owner_key)
+        .force_transfer(
+            sub_account.clone(),
+            settlement.new_owner_key,
+            Some(settlement.owner_key),
+        )
         .then(
             TlaRegistry::ext(env::current_account_id())
                 .with_static_gas(GAS_FOR_SOLD_CALLBACK)

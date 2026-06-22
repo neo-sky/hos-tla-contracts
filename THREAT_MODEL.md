@@ -24,6 +24,17 @@ install.
 The wallet (`hos-wallet`) holds no FullAccess key. Every action flows through the
 extensions installed at mint.
 
+The owner cannot reconfigure that authority. The only owner-reachable path into the
+wallet is `active-signer.submit_signed_request`, and it rejects any request that
+carries wallet ops, so an owner-signed request can move funds and call contracts but
+cannot add or remove an extension or re-enable the native signature path. This is
+what keeps a sub-account sale clean: the seller cannot plant a back-door extension to
+keep authority after the buyer pays, and cannot strip the signer to brick the buyer.
+As a second line, a sale reads the wallet's extension set on chain at settlement and
+refuses to transfer unless it is exactly the canonical pair (`active-signer` plus
+`hos-extension`), so any wallet whose authority set has drifted from the mint shape
+cannot be sold.
+
 ## Deployment and governance invariants
 
 Two properties the contracts cannot enforce on their own. They have to hold in
@@ -58,6 +69,9 @@ Both recovery modes pass the same gate before anything settles on-chain:
   domain-separated message; duplicate signatures and non-watcher keys are dropped
   before counting.
 - The policy owner can abort an in-flight recovery.
+- A policy can only be reinstalled while the account is idle, and the reinstall
+  preserves the monotonic round, so it cannot abandon a frozen in-flight recovery or
+  reopen a spent round for replay.
 
 Two more properties hold under failure. Callbacks never panic on their failure
 branch, so a half-completed cross-contract call cannot brick a recovery; it stays
@@ -96,6 +110,17 @@ path does not:
 - The signing key is derived under a per-account path, which has to be unique per
   account or signatures could be reused across accounts.
 
+Native finalize is owner-gated and does not treat a signature as a completed
+recovery. `finalize_recovery` on a native policy can only be called by the policy
+owner, who supplies the account nonce and a recent block hash; an MPC signature over
+the wrong parameters is useless, so leaving the call open to anyone would only let a
+stranger burn an approved round with stale inputs. When the signer returns, the round
+does not close: it returns to Approved and the signed transaction is handed back for
+broadcast. Only `claim_native_finalized`, again owner-gated, retires the round, and
+the operator calls it after confirming the `AddKey` actually landed on chain. So a
+produced signature never stands in for an accepted transaction, and a failed
+broadcast leaves the recovery retryable rather than falsely finalized.
+
 Use native mode only where a FullAccess recovery key and a dependency on `v1.signer`
 are both acceptable. Everything House of Stake manages defaults to wallet mode.
 
@@ -104,11 +129,20 @@ are both acceptable. Everything House of Stake manages defaults to wallet mode.
 Sale settlement takes a per-listing `settling` lock, so two settlements cannot run
 against the same listing at once.
 
-The asset gate blocks any sale or reclaim that would move a sub-account unless every
-allow-listed fungible-token balance reads as provably zero. It is fail-closed: a
-balance query that fails or does not parse blocks the move rather than waving it
-through. The allowlist is capped at 16 so the per-token fan-out stays inside the gas
-limit; raising the cap means re-checking the gas budget first.
+A sale is anchored to the owner key the seller listed against. `list_sub_account` and
+`accept_offer` record the seller's current owner key, and settlement passes it to
+`swap_owner` as a compare-and-swap. If the wallet's signing key has changed since the
+listing (for example a recovery rotated it), the swap voids, the sale does not
+complete, and the buyer is refunded. The settlement callback treats a voided swap as a
+failed sale, not a silent success.
+
+The asset gate blocks any sale, reclaim, or re-rent that would move a sub-account
+unless every allow-listed fungible-token balance reads as provably zero. It is
+fail-closed: a balance query that fails or does not parse blocks the move rather than
+waving it through. Re-renting a parked name runs the same gate, so a new renter cannot
+inherit fungible tokens that landed on the wallet while it was parked. The allowlist is
+capped at 16 so the per-token fan-out stays inside the gas limit; raising the cap means
+re-checking the gas budget first.
 
 Refunds are pull-based through `claim_refund`. The contract never pushes funds in a
 way that could wedge on a failed transfer.
@@ -123,6 +157,13 @@ wallet transfers with the sub-account on a sale or reclaim; a seller has to move
 NFTs out before listing. NFT-aware gating is a V2 item.
 
 The vendored `hos-wallet` fork is audited upstream and pinned by commit. Only the
-added `init` is in scope here.
+added `init` is in scope here. The wallet still lets an enabled extension flip its
+signature mode through `SetSignatureMode`, but this is not reachable as an escalation:
+the owner signing path rejects all wallet ops (so an owner cannot send it), neither
+core extension ever emits it, and the contract is built no-sign, so the signature
+verifier is dead code that cannot validate anything even if the flag were flipped. A
+wallet-side guard against `SetSignatureMode` would only matter to a compromised core
+extension, which already controls the wallet outright, so the fork is intentionally
+left at its audited commit rather than patched for this.
 
 Off-chain pieces (the relay, attestation issuance) sit outside this on-chain model.

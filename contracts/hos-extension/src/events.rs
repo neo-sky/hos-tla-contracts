@@ -34,7 +34,7 @@ pub enum Event {
         by: AccountId,
     },
     #[event_version("1.0.0")]
-    SweepCompleted {
+    SweepDispatched {
         wallet: AccountId,
         ft: AccountId,
         destination: AccountId,

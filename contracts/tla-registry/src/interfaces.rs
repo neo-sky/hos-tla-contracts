@@ -5,7 +5,12 @@ use near_sdk::{ext_contract, AccountId, PublicKey};
 #[ext_contract(ext_hos_extension)]
 pub trait HosExtension {
     fn sweep_ft(&mut self, wallet: AccountId, ft: AccountId, destination: AccountId);
-    fn force_transfer(&mut self, wallet: AccountId, new_public_key: PublicKey);
+    fn force_transfer(
+        &mut self,
+        wallet: AccountId,
+        new_public_key: PublicKey,
+        expected_current: Option<PublicKey>,
+    );
 }
 
 #[allow(dead_code)]

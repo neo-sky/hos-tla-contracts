@@ -123,6 +123,7 @@ impl ActiveSigner {
         require!(!env::attached_deposit().is_zero(), error::DEPOSIT_REQUIRED);
         require!(msg.chain_id == CHAIN_ID, error::WRONG_CHAIN);
         require!(msg.signer_id == wallet, error::SIGNER_MISMATCH);
+        require!(msg.request.ops.is_empty(), error::OPS_NOT_ALLOWED);
         let deposit = env::attached_deposit();
         let entry = self
             .signers
@@ -287,7 +288,7 @@ fn is_direct_subaccount(wallet: &AccountId, parent: &AccountId) -> bool {
 mod tests {
     use super::*;
     use defuse_wallet::signature::Deadline;
-    use defuse_wallet::Request;
+    use defuse_wallet::{Request, WalletOp};
     use defuse_wallet_sdk::ed25519::ed25519_dalek::SigningKey;
     use defuse_wallet_sdk::Signer;
     use near_sdk::test_utils::VMContextBuilder;
@@ -386,6 +387,30 @@ mod tests {
         install(&mut c, &k);
         let (mut msg, proof) = sign(&k, 1);
         msg.chain_id = "testnet".to_string();
+        ctx("relayer.testnet", 1, TS);
+        let _ = c.submit_signed_request(acc(WALLET), msg, proof);
+    }
+
+    #[test]
+    #[should_panic(expected = "wallet ops are not allowed")]
+    fn signed_request_with_ops_rejected() {
+        let mut c = deploy();
+        let k = key(7);
+        install(&mut c, &k);
+        ctx("client.testnet", 0, TS);
+        let mut request = Request::new();
+        request.ops.push(WalletOp::AddExtension {
+            account_id: acc("backdoor.testnet"),
+        });
+        let msg = RequestMessage {
+            chain_id: CHAIN_ID.to_string(),
+            signer_id: acc(WALLET),
+            nonce: 1,
+            created_at: Deadline::now() - Duration::from_secs(60),
+            timeout: Duration::from_secs(3600),
+            request,
+        };
+        let proof = Signer::sign(&k, &msg).unwrap();
         ctx("relayer.testnet", 1, TS);
         let _ = c.submit_signed_request(acc(WALLET), msg, proof);
     }

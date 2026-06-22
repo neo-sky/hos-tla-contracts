@@ -11,10 +11,10 @@ use near_sdk::{
 };
 
 const GAS_FOR_HOS_SWEEP: Gas = Gas::from_tgas(120);
-const GAS_FOR_HOS_FORCE_TRANSFER: Gas = Gas::from_tgas(20);
+const GAS_FOR_HOS_FORCE_TRANSFER: Gas = Gas::from_tgas(45);
 const GAS_FOR_FINALIZE_CB: Gas = Gas::from_tgas(10);
 const GAS_FOR_BALANCE_QUERY: Gas = Gas::from_tgas(5);
-const GAS_FOR_BALANCES_CB_TOTAL: Gas = Gas::from_tgas(55);
+const GAS_FOR_BALANCES_CB_TOTAL: Gas = Gas::from_tgas(80);
 
 const SWEEP_ATTACHED_REQUIRED: NearToken =
     NearToken::from_yoctonear(1_250_000_000_000_000_000_000 + 1);
@@ -190,7 +190,7 @@ impl TlaRegistry {
     ) -> Promise {
         ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_HOS_FORCE_TRANSFER)
-            .force_transfer(sub_account, self.parked_signer_pubkey.clone())
+            .force_transfer(sub_account, self.parked_signer_pubkey.clone(), None)
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_FOR_FINALIZE_CB)

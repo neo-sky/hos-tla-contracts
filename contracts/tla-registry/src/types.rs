@@ -2,7 +2,7 @@ use crate::error::{ContractError, NameInvalidReason};
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::json_types::{U128, U64};
 use near_sdk::serde::{Deserialize, Serialize};
-use near_sdk::{env, AccountId};
+use near_sdk::{env, AccountId, PublicKey};
 
 pub const ONE_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
 pub const ONE_YEAR_NS: u64 = 365 * 24 * 60 * 60 * 1_000_000_000;
@@ -72,6 +72,7 @@ pub struct SubAccountEntry {
 pub struct Listing {
     pub price: u128,
     pub settling: bool,
+    pub owner_key: PublicKey,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Clone)]
@@ -87,6 +88,7 @@ pub struct AcceptedOffer {
     pub buyer: AccountId,
     pub price: u128,
     pub settling: bool,
+    pub owner_key: PublicKey,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone)]

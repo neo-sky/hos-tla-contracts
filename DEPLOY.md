@@ -123,12 +123,47 @@ contract out, but it will not stop you from leaving a second admin in by acciden
 read back each contract's admin set when you are done. `mpc-recovery` has no admin
 handoff; its owner is whatever was set at init.
 
-## 6. Verify
+## 6. Verify (launch gate)
 
-- The on-chain code hash of each contract matches the reproducible-build hash you
-  recorded.
-- `<council>` is the only admin on `active-signer`, `hos-extension`, and
-  `tla-registry`.
-- No TLA account holds a FullAccess key.
-- Smoke test: rent a sub-account, submit a signed request through `active-signer`,
-  and confirm the wallet executes it.
+The contracts cannot enforce the deployment invariants on themselves: a TLA account
+that keeps a FullAccess key, or an admin set with a stray key in it, is invisible to
+the on-chain logic but fatal to the security model. So this is a gate, not a
+checklist. Read every value back from chain after the handoff, and treat any miss as
+a launch blocker, not a follow-up.
+
+Admin and minter sets, read from chain (not from your deploy notes):
+
+    near view <active-signer> admins         # expect exactly [<council>]
+    near view <active-signer> minters        # expect exactly the TLA accounts you added
+    near view <hos-extension> get_admins     # expect exactly [<council>]
+    near view <tla-registry>  get_admins     # expect exactly [<council>]
+
+A bootstrap or deployer key left in any admin set is a single-key backdoor next to the
+multisig. If any set has more than `<council>` in it, stop and remove the extra before
+launch.
+
+Every TLA account is locked. For each TLA account, list its keys and confirm none has
+FullAccess permission:
+
+    near account list-keys <tla-account>
+
+The expected result is no FullAccess key at all; only the `tla-manager` contract
+methods should be reachable. A single FullAccess key on a TLA account lets it squat or
+grief signer slots under its namespace, so a hit here blocks launch until the key is
+removed.
+
+`mpc-recovery` owner, watcher set, and threshold match what you intended:
+
+    near view <mpc-recovery> # confirm owner, watchers, threshold via the contract's views
+
+Code hashes match the reproducible build:
+
+- The on-chain code hash of each contract equals the reproducible-build hash you
+  recorded in step 1. Anyone verifying the deploy compares against on-chain code.
+
+Smoke test, last:
+
+- Rent a sub-account, submit a signed request through `active-signer`, and confirm the
+  wallet executes it. Then confirm a wallet-ops request (AddExtension) submitted the
+  same way is rejected, and that a sale settles only when the wallet's extension set is
+  the canonical pair.

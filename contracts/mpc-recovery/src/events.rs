@@ -11,6 +11,8 @@ pub enum Event {
     #[event_version("1.0.0")]
     Cancelled { account: AccountId, round: u64 },
     #[event_version("1.0.0")]
+    NativeSignatureProduced { account: AccountId, round: u64 },
+    #[event_version("1.0.0")]
     Finalized { account: AccountId, round: u64 },
     #[event_version("1.0.0")]
     Aborted { account: AccountId, round: u64 },

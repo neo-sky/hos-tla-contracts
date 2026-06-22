@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use defuse_wallet::signature::{Deadline, RequestMessage};
-use defuse_wallet::{PromiseSingle, Request};
+use defuse_wallet::{PromiseSingle, Request, WalletOp};
 use defuse_wallet_sdk::ed25519::ed25519_dalek::Signer as DalekSigner;
 use defuse_wallet_sdk::ed25519::ed25519_dalek::SigningKey;
 use defuse_wallet_sdk::Signer;
@@ -194,6 +194,30 @@ fn signed_transfer(
     (serde_json::to_value(&msg).unwrap(), proof)
 }
 
+fn signed_add_extension(
+    wallet: &AccountId,
+    extension: &AccountId,
+    nonce: u32,
+    key: &SigningKey,
+) -> (serde_json::Value, String) {
+    let signer_id = near_sdk::AccountId::from_str(wallet.as_str()).unwrap();
+    let extension = near_sdk::AccountId::from_str(extension.as_str()).unwrap();
+    let mut request = Request::new();
+    request.ops.push(WalletOp::AddExtension {
+        account_id: extension,
+    });
+    let msg = RequestMessage {
+        chain_id: "mainnet".to_string(),
+        signer_id,
+        nonce,
+        created_at: Deadline::now() - Duration::from_secs(60),
+        timeout: Duration::from_secs(TIMEOUT_SECS as u64),
+        request,
+    };
+    let proof = Signer::sign(key, &msg).unwrap();
+    (serde_json::to_value(&msg).unwrap(), proof)
+}
+
 async fn submit(
     h: &Harness,
     wallet: &AccountId,
@@ -286,6 +310,30 @@ async fn signed_request_executes_through_active_signer() -> Result<()> {
 }
 
 #[tokio::test]
+async fn owner_cannot_mutate_extension_set_through_active_signer() -> Result<()> {
+    let h = setup().await?;
+    let owner = user_key(7);
+    let wallet = mint_wallet(&h, "alice", &owner).await?;
+
+    let before: Vec<String> = h.registry.view(wallet.id(), "w_extensions").await?.json()?;
+    assert_eq!(before.len(), 2, "wallet mints with exactly two extensions");
+
+    let (msg, proof) = signed_add_extension(wallet.id(), h.admin.id(), 1, &owner);
+    let exec = submit(&h, wallet.id(), &msg, &proof).await?;
+    assert!(
+        exec.is_failure(),
+        "owner-signed wallet ops must be rejected at the signer: {exec:#?}"
+    );
+
+    let after: Vec<String> = h.registry.view(wallet.id(), "w_extensions").await?.json()?;
+    assert_eq!(
+        before, after,
+        "the wallet extension set must be unchanged after a rejected ops request"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn marketplace_rotation_kills_old_key() -> Result<()> {
     let h = setup().await?;
     let owner = user_key(7);
@@ -294,7 +342,7 @@ async fn marketplace_rotation_kills_old_key() -> Result<()> {
 
     h.registry
         .call(h.hos_extension.id(), "force_transfer")
-        .args_json(json!({ "wallet": wallet.id(), "new_public_key": ws_pubkey(&buyer) }))
+        .args_json(json!({ "wallet": wallet.id(), "new_public_key": ws_pubkey(&buyer), "expected_current": null }))
         .gas(Gas::from_tgas(60))
         .transact()
         .await?
@@ -422,7 +470,7 @@ async fn sold_recovery_wallet_cannot_be_clawed_back() -> Result<()> {
     let buyer = user_key(8);
     h.registry
         .call(h.hos_extension.id(), "force_transfer")
-        .args_json(json!({ "wallet": wallet.id(), "new_public_key": raw_base58(&buyer) }))
+        .args_json(json!({ "wallet": wallet.id(), "new_public_key": raw_base58(&buyer), "expected_current": null }))
         .gas(Gas::from_tgas(60))
         .transact()
         .await?
@@ -759,7 +807,7 @@ async fn sale_during_pending_recovery_resets_policy() -> Result<()> {
 
     h.registry
         .call(h.hos_extension.id(), "force_transfer")
-        .args_json(json!({ "wallet": wallet.id(), "new_public_key": raw_base58(&buyer) }))
+        .args_json(json!({ "wallet": wallet.id(), "new_public_key": raw_base58(&buyer), "expected_current": null }))
         .gas(Gas::from_tgas(60))
         .transact()
         .await?

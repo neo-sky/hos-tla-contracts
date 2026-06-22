@@ -80,6 +80,13 @@ impl MpcRecovery {
             env::predecessor_account_id() == self.owner,
             error::ONLY_OWNER
         );
+        let round = match self.accounts.get(&account) {
+            Some(existing) => {
+                require!(matches!(existing.phase, Phase::Idle), error::NOT_IDLE);
+                existing.round
+            }
+            None => 0,
+        };
         self.accounts.insert(
             account.clone(),
             Account {
@@ -88,7 +95,7 @@ impl MpcRecovery {
                     attestation_key,
                     timelock_secs,
                 },
-                round: 0,
+                round,
                 phase: Phase::Idle,
             },
         );
@@ -222,6 +229,8 @@ impl MpcRecovery {
         nonce: U64,
         block_hash: Base58CryptoHash,
     ) -> Promise {
+        let caller = env::predecessor_account_id();
+        let owner = self.owner.clone();
         let entry = self
             .accounts
             .get_mut(&account)
@@ -230,6 +239,9 @@ impl MpcRecovery {
             Phase::Approved { new_owner, round } => (new_owner.clone(), *round),
             _ => env::panic_str(error::NOT_APPROVED),
         };
+        if matches!(entry.policy.target, Target::Native { .. }) {
+            require!(caller == owner, error::ONLY_OWNER);
+        }
         entry.phase = Phase::Resolving {
             new_owner: new_owner.clone(),
             round,
@@ -357,23 +369,44 @@ impl MpcRecovery {
         signed_tx_hash: String,
         #[callback_result] mpc_signature: Result<Value, PromiseError>,
     ) -> Option<RecoveryResult> {
+        let reverted = self.revert_to_approved(&account, round);
         match mpc_signature {
-            Ok(mpc_signature) => {
-                if self.settle_resolution(&account, round, true) {
-                    Event::Finalized { account, round }.emit();
-                    Some(RecoveryResult {
-                        signed_tx_hash,
-                        mpc_signature,
-                    })
-                } else {
-                    None
-                }
+            Ok(mpc_signature) if reverted => {
+                Event::NativeSignatureProduced { account, round }.emit();
+                Some(RecoveryResult {
+                    signed_tx_hash,
+                    mpc_signature,
+                })
             }
-            Err(_) => {
-                self.settle_resolution(&account, round, false);
-                None
-            }
+            _ => None,
         }
+    }
+
+    pub fn claim_native_finalized(&mut self, account: AccountId, round: U64) {
+        require!(
+            env::predecessor_account_id() == self.owner,
+            error::ONLY_OWNER
+        );
+        let entry = self
+            .accounts
+            .get_mut(&account)
+            .unwrap_or_else(|| env::panic_str(error::NO_POLICY));
+        require!(
+            matches!(entry.policy.target, Target::Native { .. }),
+            error::NOT_NATIVE
+        );
+        match &entry.phase {
+            Phase::Approved {
+                round: approved, ..
+            } if *approved == round.0 => {}
+            _ => env::panic_str(error::NOT_APPROVED),
+        }
+        entry.phase = Phase::Idle;
+        Event::Finalized {
+            account,
+            round: round.0,
+        }
+        .emit();
     }
 
     pub fn round_of(&self, account: AccountId) -> Option<u64> {
@@ -423,6 +456,21 @@ impl MpcRecovery {
                     .with_static_gas(CALLBACK_GAS)
                     .on_signed(account.clone(), round, hash_hex),
             )
+    }
+
+    fn revert_to_approved(&mut self, account: &AccountId, round: u64) -> bool {
+        let Some(entry) = self.accounts.get_mut(account) else {
+            return false;
+        };
+        let new_owner = match &entry.phase {
+            Phase::Resolving {
+                new_owner,
+                round: resolving_round,
+            } if *resolving_round == round => new_owner.clone(),
+            _ => return false,
+        };
+        entry.phase = Phase::Approved { new_owner, round };
+        true
     }
 
     fn settle_resolution(&mut self, account: &AccountId, round: u64, success: bool) -> bool {

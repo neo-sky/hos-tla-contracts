@@ -5,6 +5,7 @@ pub const NO_POLICY: &str = "no recovery policy for account";
 pub const NOT_IDLE: &str = "recovery already in progress";
 pub const NOT_REQUESTED: &str = "no recovery requested";
 pub const NOT_APPROVED: &str = "recovery not approved";
+pub const NOT_NATIVE: &str = "policy is not a native-recovery policy";
 pub const NOT_ACTIVE: &str = "no abortable recovery in progress";
 pub const STALE_ROUND: &str = "stale or invalid round";
 pub const BAD_ATTESTATION: &str = "invalid attestation signature";

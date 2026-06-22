@@ -546,6 +546,7 @@ async fn full_registry_mint_flow() -> Result<()> {
             "tla_id": tla.id(),
             "name": "alice",
             "price": NearToken::from_near(10).as_yoctonear().to_string(),
+            "owner_key": ws_pubkey(&owner),
         }))
         .deposit(NearToken::from_yoctonear(1))
         .transact()
@@ -662,6 +663,7 @@ async fn asset_gate_fits_gas_at_full_allowlist() -> Result<()> {
             "tla_id": env.tla.id(),
             "name": "alice",
             "price": NearToken::from_near(5).as_yoctonear().to_string(),
+            "owner_key": ws_pubkey(&owner),
         }))
         .deposit(NearToken::from_yoctonear(1))
         .transact()
@@ -702,6 +704,342 @@ async fn asset_gate_fits_gas_at_full_allowlist() -> Result<()> {
         new_owner.as_deref(),
         Some(raw_base58(&buyer_key).as_str()),
         "sale settles after the gate clears all 16 balances within gas"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn sale_voids_when_listed_owner_key_is_stale() -> Result<()> {
+    let env = setup(true).await?;
+    let root = env.worker.root_account()?;
+    let owner = user_key(7);
+
+    env.renter
+        .call(env.registry.id(), "rent_sub_account")
+        .args_json(json!({
+            "tla_id": env.tla.id(),
+            "name": "alice",
+            "owner_key": ws_pubkey(&owner),
+            "main_wallet": env.renter.id(),
+        }))
+        .deposit(NearToken::from_near(10))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let stale = user_key(50);
+    env.renter
+        .call(env.registry.id(), "list_sub_account")
+        .args_json(json!({
+            "tla_id": env.tla.id(),
+            "name": "alice",
+            "price": NearToken::from_near(5).as_yoctonear().to_string(),
+            "owner_key": ws_pubkey(&stale),
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let buyer = root
+        .create_subaccount("buyer")
+        .initial_balance(NearToken::from_near(50))
+        .transact()
+        .await?
+        .into_result()?;
+    buyer
+        .call(env.registry.id(), "buy_sub_account")
+        .args_json(json!({
+            "tla_id": env.tla.id(),
+            "name": "alice",
+            "new_owner_key": ws_pubkey(&user_key(8)),
+        }))
+        .deposit(NearToken::from_near(6))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let wallet_id: AccountId = format!("alice.{}", env.tla.id()).parse()?;
+    let signer: Option<String> = env
+        .active_signer
+        .view("signer_of")
+        .args_json(json!({ "wallet": wallet_id }))
+        .await?
+        .json()?;
+    assert_eq!(
+        signer.as_deref(),
+        Some(raw_base58(&owner).as_str()),
+        "a stale-key listing must void the swap and leave the wallet signer unchanged"
+    );
+    let refund: String = env
+        .registry
+        .view("get_pending_refund")
+        .args_json(json!({ "account_id": buyer.id() }))
+        .await?
+        .json()?;
+    assert_ne!(refund, "0", "buyer must be refunded when the sale voids on a CAS mismatch");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn reclaim_rerent_and_asset_gate() -> Result<()> {
+    let worker = near_workspaces::sandbox().await?;
+    let root = worker.root_account()?;
+
+    let admin = root
+        .create_subaccount("admin")
+        .initial_balance(NearToken::from_near(50))
+        .transact()
+        .await?
+        .into_result()?;
+    let recovery = root
+        .create_subaccount("recovery")
+        .initial_balance(NearToken::from_near(10))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let active_signer = deploy_at(&root, "asigner", 30, ACTIVE_SIGNER_WASM).await?;
+    let hos_extension = deploy_at(&root, "hosext", 30, HOS_EXTENSION_WASM).await?;
+    let registry = deploy_at(&root, "registry", 50, TLA_REGISTRY_WASM).await?;
+
+    active_signer
+        .call("new")
+        .args_json(json!({
+            "admin": admin.id(),
+            "marketplace_authority": hos_extension.id(),
+            "recovery_authority": recovery.id(),
+            "timeout_secs": TIMEOUT_SECS,
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+    hos_extension
+        .call("new")
+        .args_json(json!({
+            "admin": admin.id(),
+            "registry": registry.id(),
+            "active_signer": active_signer.id(),
+            "recovery": recovery.id(),
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+    registry
+        .call("new")
+        .args_json(json!({
+            "admin": admin.id(),
+            "hos_extension": hos_extension.id(),
+            "parked_signer_pubkey": ws_pubkey(&user_key(99)),
+            "grace_period_ns": GRACE_NS.to_string(),
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let deployer = root
+        .create_subaccount("deployer")
+        .initial_balance(NearToken::from_near(50))
+        .transact()
+        .await?
+        .into_result()?;
+    let wallet_hash = deploy_wallet_global(&worker, &deployer).await?;
+
+    let tla = root
+        .create_subaccount("biztla")
+        .initial_balance(NearToken::from_near(100))
+        .transact()
+        .await?
+        .into_result()?;
+    let manager_wasm = std::fs::read(TLA_MANAGER_WASM)?;
+    let manager = tla.deploy(&manager_wasm).await?.into_result()?;
+    manager
+        .call("new")
+        .args_json(json!({
+            "registry": registry.id(),
+            "active_signer": active_signer.id(),
+            "hos_extension": hos_extension.id(),
+            "wallet_code_hash": bs58::encode(wallet_hash).into_string(),
+            "min_balance": NearToken::from_near(2),
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+    admin
+        .call(active_signer.id(), "add_minter")
+        .args_json(json!({ "minter": tla.id() }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let one = NearToken::from_near(1).as_yoctonear().to_string();
+    let two = NearToken::from_near(2).as_yoctonear().to_string();
+    admin
+        .call(registry.id(), "update_fee_config")
+        .args_json(json!({ "config": {
+            "tla_allocation_fee": one,
+            "rent_tier_5": one,
+            "rent_tier_8": one,
+            "rent_tier_10": one,
+            "rent_tier_12plus": one,
+            "sub_fee_per_account": one,
+            "account_creation_deposit": two,
+            "business_max_subs": 1000,
+            "retraction_notice_ns": "1",
+            "resale_commission_bps": 0,
+        }}))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let licensee = root
+        .create_subaccount("licensee")
+        .initial_balance(NearToken::from_near(100))
+        .transact()
+        .await?
+        .into_result()?;
+
+    admin
+        .call(registry.id(), "register_tla")
+        .args_json(json!({
+            "tla_id": tla.id(),
+            "tla_type": "Business",
+            "premium_category": "Standard",
+            "licensee": licensee.id(),
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+    licensee
+        .call(registry.id(), "activate_tla")
+        .args_json(json!({ "tla_id": tla.id() }))
+        .deposit(NearToken::from_near(5))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let owner = user_key(7);
+    let rent = licensee
+        .call(registry.id(), "rent_sub_account")
+        .args_json(json!({
+            "tla_id": tla.id(),
+            "name": "staff",
+            "owner_key": ws_pubkey(&owner),
+            "main_wallet": licensee.id(),
+        }))
+        .deposit(NearToken::from_near(10))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(rent.is_success(), "business rent failed: {rent:#?}");
+
+    licensee
+        .call(registry.id(), "schedule_retraction")
+        .args_json(json!({ "tla_id": tla.id(), "name": "staff" }))
+        .deposit(NearToken::from_yoctonear(1))
+        .transact()
+        .await?
+        .into_result()?;
+
+    worker.fast_forward(2).await?;
+
+    let finalize = admin
+        .call(registry.id(), "reclaim_finalize")
+        .args_json(json!({ "tla_id": tla.id(), "name": "staff" }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(finalize.is_success(), "reclaim_finalize failed: {finalize:#?}");
+
+    let wallet_id: AccountId = format!("staff.{}", tla.id()).parse()?;
+    let parked_owner: Option<String> = active_signer
+        .view("signer_of")
+        .args_json(json!({ "wallet": wallet_id }))
+        .await?
+        .json()?;
+    assert_eq!(
+        parked_owner.as_deref(),
+        Some(raw_base58(&user_key(99)).as_str()),
+        "park must rotate the wallet owner to the parked signer key (force_transfer fit gas)"
+    );
+
+    let ft = deploy_at(&root, "usdc", 5, TEST_FT_WASM).await?;
+    ft.call("new")
+        .args_json(json!({ "owner": ft.id(), "total_supply": "0" }))
+        .transact()
+        .await?
+        .into_result()?;
+    ft.call("mint")
+        .args_json(json!({ "account_id": wallet_id, "amount": "1000000" }))
+        .transact()
+        .await?
+        .into_result()?;
+    admin
+        .call(registry.id(), "add_ft_allowlist")
+        .args_json(json!({ "token": ft.id() }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let _ = licensee
+        .call(registry.id(), "rent_sub_account")
+        .args_json(json!({
+            "tla_id": tla.id(),
+            "name": "staff",
+            "owner_key": ws_pubkey(&user_key(10)),
+            "main_wallet": licensee.id(),
+        }))
+        .deposit(NearToken::from_near(10))
+        .max_gas()
+        .transact()
+        .await?;
+    let still_parked: Option<String> = active_signer
+        .view("signer_of")
+        .args_json(json!({ "wallet": wallet_id }))
+        .await?
+        .json()?;
+    assert_eq!(
+        still_parked.as_deref(),
+        Some(raw_base58(&user_key(99)).as_str()),
+        "re-rent must be blocked by the asset gate while the parked wallet holds an allow-listed FT"
+    );
+
+    admin
+        .call(registry.id(), "remove_ft_allowlist")
+        .args_json(json!({ "token": ft.id() }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let new_owner = user_key(8);
+    let re_rent = licensee
+        .call(registry.id(), "rent_sub_account")
+        .args_json(json!({
+            "tla_id": tla.id(),
+            "name": "staff",
+            "owner_key": ws_pubkey(&new_owner),
+            "main_wallet": licensee.id(),
+        }))
+        .deposit(NearToken::from_near(10))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(re_rent.is_success(), "re-rent failed: {re_rent:#?}");
+
+    let re_rented_owner: Option<String> = active_signer
+        .view("signer_of")
+        .args_json(json!({ "wallet": wallet_id }))
+        .await?
+        .json()?;
+    assert_eq!(
+        re_rented_owner.as_deref(),
+        Some(raw_base58(&new_owner).as_str()),
+        "re-rent must rotate the parked wallet to the new renter (force_transfer fit gas)"
     );
 
     Ok(())

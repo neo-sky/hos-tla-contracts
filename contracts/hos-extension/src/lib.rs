@@ -1,6 +1,8 @@
 mod error;
 mod events;
 
+use std::collections::BTreeSet;
+
 use crate::error::ContractError;
 use crate::events::Event;
 use defuse_wallet::{ext_wallet, FunctionCallAction, PromiseSingle, Request};
@@ -17,6 +19,8 @@ const CONTRACT_VERSION: u8 = 1;
 
 const GAS_FOR_SWAP_OWNER: Gas = Gas::from_tgas(8);
 const GAS_FOR_RESET: Gas = Gas::from_tgas(5);
+const GAS_FOR_EXT_QUERY: Gas = Gas::from_tgas(5);
+const GAS_FOR_EXT_VERIFY_CB: Gas = Gas::from_tgas(25);
 const GAS_FOR_BALANCE_QUERY: Gas = Gas::from_tgas(5);
 const GAS_FOR_BALANCE_CB: Gas = Gas::from_tgas(35);
 const GAS_FOR_STORAGE_DEPOSIT: Gas = Gas::from_tgas(10);
@@ -28,6 +32,9 @@ const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(10);
 const STORAGE_DEPOSIT_AMOUNT: NearToken = NearToken::from_yoctonear(1_250_000_000_000_000_000_000);
 const MIN_SWEEP_ATTACHED: NearToken = NearToken::from_yoctonear(1_250_000_000_000_000_000_000 + 1);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
+
+const EXT_QUERY_FAILED: &str = "could not read wallet extension set";
+const NON_CANONICAL_EXTENSIONS: &str = "wallet extension set is not canonical";
 
 #[allow(dead_code)]
 #[ext_contract(ext_ft)]
@@ -191,22 +198,52 @@ impl HosExtension {
         &mut self,
         wallet: AccountId,
         new_public_key: PublicKey,
+        expected_current: Option<PublicKey>,
     ) -> Result<Promise, ContractError> {
         self.assert_registry()?;
         self.assert_not_paused()?;
         let raw_key = ed25519_base58(&new_public_key)?;
+        let expected_raw = match expected_current {
+            Some(key) => Some(ed25519_base58(&key)?),
+            None => None,
+        };
         Event::ForceTransferRequested {
             wallet: wallet.clone(),
             new_public_key,
             by: env::predecessor_account_id(),
         }
         .emit();
+        Ok(ext_wallet::ext(wallet.clone())
+            .with_static_gas(GAS_FOR_EXT_QUERY)
+            .w_extensions()
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_EXT_VERIFY_CB)
+                    .after_extensions_checked(wallet, raw_key, expected_raw),
+            ))
+    }
+
+    #[private]
+    pub fn after_extensions_checked(
+        &mut self,
+        wallet: AccountId,
+        new_public_key: String,
+        expected_current: Option<String>,
+        #[callback_result] extensions: Result<BTreeSet<AccountId>, PromiseError>,
+    ) -> Promise {
+        let extensions = extensions.unwrap_or_else(|_| env::panic_str(EXT_QUERY_FAILED));
+        let mut canonical = BTreeSet::new();
+        canonical.insert(self.active_signer.clone());
+        canonical.insert(env::current_account_id());
+        if extensions != canonical {
+            env::panic_str(NON_CANONICAL_EXTENSIONS);
+        }
         let _ = ext_mpc_recovery::ext(self.recovery.clone())
             .with_static_gas(GAS_FOR_RESET)
             .on_wallet_transferred(wallet.clone());
-        Ok(ext_active_signer::ext(self.active_signer.clone())
+        ext_active_signer::ext(self.active_signer.clone())
             .with_static_gas(GAS_FOR_SWAP_OWNER)
-            .swap_owner(wallet, raw_key, None))
+            .swap_owner(wallet, new_public_key, expected_current)
     }
 
     #[payable]
@@ -324,7 +361,7 @@ impl HosExtension {
         amount: U128,
     ) {
         if near_sdk::is_promise_success() {
-            Event::SweepCompleted {
+            Event::SweepDispatched {
                 wallet,
                 ft,
                 destination,
@@ -335,7 +372,7 @@ impl HosExtension {
             Event::SweepFailed {
                 wallet,
                 ft,
-                reason: "ft_transfer_failed".to_string(),
+                reason: "wallet_execute_failed".to_string(),
             }
             .emit();
         }
@@ -454,14 +491,14 @@ mod tests {
     fn registry_force_transfer_returns_promise() {
         let mut c = deploy();
         ctx(REGISTRY, 0);
-        let _ = c.force_transfer(acc(WALLET), key());
+        let _ = c.force_transfer(acc(WALLET), key(), None);
     }
 
     #[test]
     fn force_transfer_emits_nep297_event() {
         let mut c = deploy();
         ctx(REGISTRY, 0);
-        let _ = c.force_transfer(acc(WALLET), key());
+        let _ = c.force_transfer(acc(WALLET), key(), None);
         let logs = near_sdk::test_utils::get_logs();
         let event = logs
             .iter()
@@ -482,7 +519,7 @@ mod tests {
         let mut c = deploy();
         ctx("attacker.testnet", 0);
         assert!(matches!(
-            c.force_transfer(acc(WALLET), key()),
+            c.force_transfer(acc(WALLET), key(), None),
             Err(ContractError::OnlyRegistry)
         ));
     }
@@ -494,7 +531,7 @@ mod tests {
         c.pause().unwrap();
         ctx(REGISTRY, 0);
         assert!(matches!(
-            c.force_transfer(acc(WALLET), key()),
+            c.force_transfer(acc(WALLET), key(), None),
             Err(ContractError::Paused)
         ));
     }
@@ -508,7 +545,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            c.force_transfer(acc(WALLET), secp),
+            c.force_transfer(acc(WALLET), secp, None),
             Err(ContractError::NotEd25519)
         ));
     }
@@ -580,6 +617,52 @@ mod tests {
         let out =
             c.after_balance_for_sweep(acc(WALLET), acc(TOKEN), acc(DEST), Ok(U128(1_000_000)));
         assert!(matches!(out, PromiseOrValue::Promise(_)));
+    }
+
+    fn canonical_set() -> BTreeSet<AccountId> {
+        let mut set = BTreeSet::new();
+        set.insert(acc(SIGNER));
+        set.insert(acc("hos-extension.testnet"));
+        set
+    }
+
+    #[test]
+    fn canonical_extension_set_proceeds_to_swap() {
+        let mut c = deploy();
+        ctx("hos-extension.testnet", 0);
+        let raw = ed25519_base58(&key()).unwrap();
+        let _ = c.after_extensions_checked(acc(WALLET), raw, None, Ok(canonical_set()));
+    }
+
+    #[test]
+    #[should_panic(expected = "wallet extension set is not canonical")]
+    fn extra_extension_blocks_transfer() {
+        let mut c = deploy();
+        ctx("hos-extension.testnet", 0);
+        let mut set = canonical_set();
+        set.insert(acc("backdoor.testnet"));
+        let raw = ed25519_base58(&key()).unwrap();
+        let _ = c.after_extensions_checked(acc(WALLET), raw, None, Ok(set));
+    }
+
+    #[test]
+    #[should_panic(expected = "wallet extension set is not canonical")]
+    fn missing_active_signer_blocks_transfer() {
+        let mut c = deploy();
+        ctx("hos-extension.testnet", 0);
+        let mut set = BTreeSet::new();
+        set.insert(acc("hos-extension.testnet"));
+        let raw = ed25519_base58(&key()).unwrap();
+        let _ = c.after_extensions_checked(acc(WALLET), raw, None, Ok(set));
+    }
+
+    #[test]
+    #[should_panic(expected = "could not read wallet extension set")]
+    fn failed_extension_query_blocks_transfer() {
+        let mut c = deploy();
+        ctx("hos-extension.testnet", 0);
+        let raw = ed25519_base58(&key()).unwrap();
+        let _ = c.after_extensions_checked(acc(WALLET), raw, None, Err(PromiseError::Failed));
     }
 
     #[test]
