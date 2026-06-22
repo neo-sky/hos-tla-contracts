@@ -251,7 +251,7 @@ impl TlaRegistry {
         self.refund_excess(&caller, attached.as_yoctonear(), rent);
 
         Event::TlaRenewed {
-            entity: tla_id,
+            tla_id,
             new_expires_at,
             paid_yocto: U128(rent),
         }
@@ -270,6 +270,7 @@ impl TlaRegistry {
         crate::assert_one_yocto()?;
         self.assert_not_paused()?;
         let key = sub_account_key(&tla_id, &name);
+        self.assert_sale_idle(&key)?;
         if new_wallet.as_str() == key {
             return Err(ContractError::MainWalletEqualsSubAccount);
         }
@@ -345,7 +346,7 @@ impl TlaRegistry {
         self.refund_excess(&caller, attached.as_yoctonear(), rent);
 
         Event::SubAccountRenewed {
-            entity: key,
+            full_name: key,
             new_expires_at,
             paid_yocto: U128(rent),
         }

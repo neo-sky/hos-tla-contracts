@@ -27,6 +27,7 @@ use near_sdk::{
 };
 
 const CONTRACT_VERSION: u8 = 1;
+const MIN_GRACE_PERIOD_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 
 const GAS_FOR_CLAIM_REFUND_CB: Gas = Gas::from_tgas(10);
 
@@ -87,6 +88,10 @@ impl TlaRegistry {
         require!(
             parked_signer_pubkey.curve_type() == CurveType::ED25519,
             "parked signer key must be ed25519"
+        );
+        require!(
+            grace_period_ns.0 >= MIN_GRACE_PERIOD_NS,
+            "grace period too short"
         );
         let mut admins = IterableSet::new(StorageKey::Admins);
         admins.insert(admin);

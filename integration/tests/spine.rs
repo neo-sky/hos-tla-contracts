@@ -453,7 +453,7 @@ async fn sold_recovery_wallet_cannot_be_clawed_back() -> Result<()> {
                 "bound_owner": ws_pubkey(&owner),
             }},
             "attestation_key": ws_pubkey(&mother),
-            "timelock_secs": 1,
+            "timelock_secs": 60,
         }))
         .transact()
         .await?
@@ -547,12 +547,14 @@ fn verdict_signature(
     watcher: &SigningKey,
     contract: &AccountId,
     account: &AccountId,
+    new_owner: &SigningKey,
     round: u64,
     silent: bool,
 ) -> serde_json::Value {
     let mut m = vec![2u8];
     push_len_str(&mut m, contract.as_str());
     push_len_str(&mut m, account.as_str());
+    m.extend_from_slice(&ed25519_pubkey_bytes(new_owner));
     m.extend_from_slice(&round.to_le_bytes());
     m.push(silent as u8);
     json!({
@@ -616,16 +618,16 @@ async fn recovery_full_lifecycle_swaps_owner() -> Result<()> {
     let new_owner = user_key(33);
     let watcher = user_key(20);
 
-    enroll_recovery(&h, &wallet, &owner, &mother, 1).await?;
+    enroll_recovery(&h, &wallet, &owner, &mother, 60).await?;
     request_recovery(&h, &wallet, &mother, &new_owner).await?;
-    h.worker.fast_forward(20).await?;
+    h.worker.fast_forward(1500).await?;
 
     h.registry
         .call(h.mpc_recovery.id(), "submit_verdict")
         .args_json(json!({
             "account": wallet.id(),
             "silent": true,
-            "signatures": [verdict_signature(&watcher, h.mpc_recovery.id(), wallet.id(), 0, true)],
+            "signatures": [verdict_signature(&watcher, h.mpc_recovery.id(), wallet.id(), &new_owner, 0, true)],
         }))
         .gas(Gas::from_tgas(100))
         .transact()
@@ -692,7 +694,7 @@ async fn recovery_rejected_before_timelock() -> Result<()> {
         .args_json(json!({
             "account": wallet.id(),
             "silent": true,
-            "signatures": [verdict_signature(&watcher, h.mpc_recovery.id(), wallet.id(), 0, true)],
+            "signatures": [verdict_signature(&watcher, h.mpc_recovery.id(), wallet.id(), &new_owner, 0, true)],
         }))
         .gas(Gas::from_tgas(100))
         .transact()
@@ -710,9 +712,9 @@ async fn recovery_rejected_with_non_watcher_signature() -> Result<()> {
     let new_owner = user_key(33);
     let impostor = user_key(77);
 
-    enroll_recovery(&h, &wallet, &owner, &mother, 1).await?;
+    enroll_recovery(&h, &wallet, &owner, &mother, 60).await?;
     request_recovery(&h, &wallet, &mother, &new_owner).await?;
-    h.worker.fast_forward(20).await?;
+    h.worker.fast_forward(1500).await?;
 
     let verdict = h
         .registry
@@ -720,7 +722,7 @@ async fn recovery_rejected_with_non_watcher_signature() -> Result<()> {
         .args_json(json!({
             "account": wallet.id(),
             "silent": true,
-            "signatures": [verdict_signature(&impostor, h.mpc_recovery.id(), wallet.id(), 0, true)],
+            "signatures": [verdict_signature(&impostor, h.mpc_recovery.id(), wallet.id(), &new_owner, 0, true)],
         }))
         .gas(Gas::from_tgas(100))
         .transact()
@@ -741,15 +743,15 @@ async fn recovery_freeze_blocks_owner_then_abort_restores() -> Result<()> {
     let new_owner = user_key(33);
     let watcher = user_key(20);
 
-    enroll_recovery(&h, &wallet, &owner, &mother, 1).await?;
+    enroll_recovery(&h, &wallet, &owner, &mother, 60).await?;
     request_recovery(&h, &wallet, &mother, &new_owner).await?;
-    h.worker.fast_forward(20).await?;
+    h.worker.fast_forward(1500).await?;
     h.registry
         .call(h.mpc_recovery.id(), "submit_verdict")
         .args_json(json!({
             "account": wallet.id(),
             "silent": true,
-            "signatures": [verdict_signature(&watcher, h.mpc_recovery.id(), wallet.id(), 0, true)],
+            "signatures": [verdict_signature(&watcher, h.mpc_recovery.id(), wallet.id(), &new_owner, 0, true)],
         }))
         .gas(Gas::from_tgas(100))
         .transact()
@@ -802,7 +804,7 @@ async fn sale_during_pending_recovery_resets_policy() -> Result<()> {
     let watcher = user_key(20);
     let buyer = user_key(8);
 
-    enroll_recovery(&h, &wallet, &owner, &mother, 1).await?;
+    enroll_recovery(&h, &wallet, &owner, &mother, 60).await?;
     request_recovery(&h, &wallet, &mother, &new_owner).await?;
 
     h.registry
@@ -832,14 +834,14 @@ async fn sale_during_pending_recovery_resets_policy() -> Result<()> {
         "buyer controls the wallet"
     );
 
-    h.worker.fast_forward(20).await?;
+    h.worker.fast_forward(1500).await?;
     let verdict = h
         .registry
         .call(h.mpc_recovery.id(), "submit_verdict")
         .args_json(json!({
             "account": wallet.id(),
             "silent": true,
-            "signatures": [verdict_signature(&watcher, h.mpc_recovery.id(), wallet.id(), 0, true)],
+            "signatures": [verdict_signature(&watcher, h.mpc_recovery.id(), wallet.id(), &new_owner, 0, true)],
         }))
         .gas(Gas::from_tgas(100))
         .transact()

@@ -30,7 +30,7 @@ pub enum Event {
     },
     #[event_version("1.0.0")]
     TlaRenewed {
-        entity: AccountId,
+        tla_id: AccountId,
         new_expires_at: u64,
         paid_yocto: U128,
     },
@@ -100,7 +100,7 @@ pub enum Event {
     },
     #[event_version("1.0.0")]
     SubAccountRenewed {
-        entity: String,
+        full_name: String,
         new_expires_at: u64,
         paid_yocto: U128,
     },
@@ -186,4 +186,6 @@ pub enum Event {
     SubAccountSignerPending { full_name: String, owner: AccountId },
     #[event_version("1.0.0")]
     SignerInstalled { full_name: String },
+    #[event_version("1.0.0")]
+    SettlingCleared { full_name: String, by: AccountId },
 }

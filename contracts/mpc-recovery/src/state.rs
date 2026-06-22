@@ -5,7 +5,6 @@ use near_sdk::{near, AccountId, PublicKey};
 pub enum Target {
     Native {
         mpc_public_key: PublicKey,
-        derivation_path: String,
     },
     Wallet {
         active_signer: AccountId,

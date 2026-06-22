@@ -61,13 +61,19 @@ Both recovery modes pass the same gate before anything settles on-chain:
 
 - A request is checked against the attestation key bound at install, never a key the
   caller supplies.
-- Each policy carries a monotonic round. A request has to match the current round,
-  and the round advances on acceptance, so a captured attestation cannot be
-  replayed.
-- A verdict cannot settle until the timelock has elapsed.
+- Each policy carries a monotonic round that only ever advances. A request has to
+  match the current round, and the round floor survives a policy reset: it is
+  preserved when `on_wallet_transferred` clears a policy on a sale or reclaim, so a
+  captured attestation or verdict cannot be replayed against a reinstalled policy at a
+  colliding round.
+- A verdict cannot settle until the timelock has elapsed, and the timelock has a
+  non-zero minimum floor so it cannot be configured away.
 - Settlement needs `threshold` distinct, valid watcher signatures over a
-  domain-separated message; duplicate signatures and non-watcher keys are dropped
-  before counting.
+  domain-separated message that binds the destination key, so the watchers authorize
+  the specific `new_owner` being installed and not merely the round; duplicate
+  signatures and non-watcher keys are dropped before counting, the watcher set is
+  deduplicated at install, and a single malformed signature is skipped rather than
+  aborting the whole batch.
 - The policy owner can abort an in-flight recovery.
 - A policy can only be reinstalled while the account is idle, and the reinstall
   preserves the monotonic round, so it cannot abandon a frozen in-flight recovery or
@@ -107,8 +113,11 @@ path does not:
 - The contract assembles the transaction itself, so a deviation from the NEAR format
   would yield an invalid or wrong-permission signature. The golden-vector test is
   what holds that line.
-- The signing key is derived under a per-account path, which has to be unique per
-  account or signatures could be reused across accounts.
+- The signing key is derived under a per-account path computed on-chain from the
+  account id (`hos-recovery/<account>`); it is no longer an operator-supplied string,
+  so two native policies cannot share a signing key. The operator must register
+  `mpc_public_key` as the key derived under that path, which the `expected_native_path`
+  view exposes for off-chain verification.
 
 Native finalize is owner-gated and does not treat a signature as a completed
 recovery. `finalize_recovery` on a native policy can only be called by the policy
@@ -126,8 +135,11 @@ are both acceptable. Everything House of Stake manages defaults to wallet mode.
 
 ## Marketplace
 
-Sale settlement takes a per-listing `settling` lock, so two settlements cannot run
-against the same listing at once.
+Sale settlement takes a per-listing `settling` lock, and reclaim, sweep, and
+`set_main_wallet` all check that same lock, so a sale and a reclaim cannot move the
+same sub-account at once. Reclaim finalization is idempotent: a duplicate finalize
+that finds the sub-account already removed is a no-op rather than a double accounting
+decrement. An admin escape hatch can clear a stuck lock if a settlement ever wedges.
 
 A sale is anchored to the owner key the seller listed against. `list_sub_account` and
 `accept_offer` record the seller's current owner key, and settlement passes it to
@@ -142,13 +154,18 @@ fail-closed: a balance query that fails or does not parse blocks the move rather
 waving it through. Re-renting a parked name runs the same gate, so a new renter cannot
 inherit fungible tokens that landed on the wallet while it was parked. The allowlist is
 capped at 16 so the per-token fan-out stays inside the gas limit; raising the cap means
-re-checking the gas budget first.
+re-checking the gas budget first. A sweep that finds a zero balance, a failed balance
+query, or a failed storage deposit refunds its unspent deposit to the registry rather
+than stranding it in the extension.
 
 Refunds are pull-based through `claim_refund`. The contract never pushes funds in a
 way that could wedge on a failed transfer.
 
 Sub-accounts under a Business (licensee-gated) TLA are not resellable, so the
-licensee boundary the rent path enforces is not lost on the marketplace.
+licensee boundary the rent path enforces is not lost on the marketplace. A
+sub-account's own owner anchoring it as their mother does not block its reclaim: the
+departing owner's self-reference is discounted at the reclaim check and cleared on
+reclaim, so a tenant cannot grief-lock an expired name past its lease.
 
 ## Out of scope
 

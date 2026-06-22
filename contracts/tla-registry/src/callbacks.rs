@@ -86,9 +86,8 @@ impl TlaRegistry {
         self.sub_account_count = self.sub_account_count.saturating_add(1);
         self.total_revenue = self.total_revenue.saturating_add(rent_yocto.0);
         self.refund_excess(&payer, attached_yocto.0, rent_yocto.0);
-        let sub = match self.sub_accounts.get(&key) {
-            Some(s) => s,
-            None => ContractError::SubAccountNotFound.panic(),
+        let Some(sub) = self.sub_accounts.get(&key) else {
+            return;
         };
         Event::SubAccountReRented {
             full_name: key.clone(),

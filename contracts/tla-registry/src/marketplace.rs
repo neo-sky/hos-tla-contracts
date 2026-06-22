@@ -301,7 +301,7 @@ impl TlaRegistry {
 }
 
 impl TlaRegistry {
-    fn assert_sale_idle(&self, key: &str) -> Result<(), ContractError> {
+    pub(crate) fn assert_sale_idle(&self, key: &str) -> Result<(), ContractError> {
         if let Some(listing) = self.listings.get(key) {
             if listing.settling {
                 return Err(ContractError::SaleInProgress);
@@ -403,7 +403,7 @@ impl TlaRegistry {
         Err(ContractError::NotListed)
     }
 
-    fn clear_settling(&mut self, key: &str) {
+    pub(crate) fn clear_settling(&mut self, key: &str) {
         if let Some(listing) = self.listings.get_mut(key) {
             listing.settling = false;
         }

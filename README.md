@@ -71,6 +71,14 @@ and recovery flows end to end:
 
     cargo test --manifest-path integration/Cargo.toml
 
+## Conventions
+
+Two error idioms are used deliberately. `tla-registry` and `hos-extension` return a
+typed `ContractError` through `#[handle_result]`; `active-signer`, `mpc-recovery`, and
+`tla-manager` use `require!` / `panic_str` with `&str` error constants. The chain id is
+pinned to `mainnet` in `active-signer` (and the vendored wallet); a testnet build must
+change that constant.
+
 ## License
 
 The House of Stake contracts (`active-signer`, `hos-extension`, `mpc-recovery`,

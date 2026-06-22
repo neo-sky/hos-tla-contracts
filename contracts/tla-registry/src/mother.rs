@@ -116,7 +116,7 @@ impl TlaRegistry {
         self.mother_use_count.insert(account.clone(), next);
     }
 
-    fn decrement_mother_use(&mut self, account: &AccountId) {
+    pub(crate) fn decrement_mother_use(&mut self, account: &AccountId) {
         let next = self
             .mother_use_count
             .get(account)

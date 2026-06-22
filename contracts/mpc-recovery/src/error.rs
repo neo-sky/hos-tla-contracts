@@ -13,3 +13,6 @@ pub const TIMELOCK: &str = "timelock not elapsed";
 pub const NO_QUORUM: &str = "watcher quorum not met";
 pub const BAD_SIGNATURE_LEN: &str = "signature must be 64 bytes";
 pub const NOT_ED25519: &str = "owner key must be ed25519";
+pub const TIMELOCK_TOO_SHORT: &str = "timelock below minimum";
+pub const DUPLICATE_WATCHER: &str = "duplicate watcher key";
+pub const MPC_NOT_ED25519: &str = "native mpc key must be ed25519";

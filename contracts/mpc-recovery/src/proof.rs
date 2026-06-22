@@ -20,12 +20,14 @@ pub fn request_message(
 pub fn verdict_message(
     contract: &AccountId,
     account: &AccountId,
+    new_owner: &PublicKey,
     round: u64,
     silent: bool,
 ) -> Vec<u8> {
     let mut m = vec![DOMAIN_VERDICT];
     push_str(&mut m, contract.as_str());
     push_str(&mut m, account.as_str());
+    m.extend_from_slice(new_owner.as_bytes());
     m.extend_from_slice(&round.to_le_bytes());
     m.push(silent as u8);
     m
@@ -132,6 +134,20 @@ mod tests {
     }
 
     #[test]
+    fn verdict_message_binds_new_owner() {
+        use std::str::FromStr;
+        ctx();
+        let contract = AccountId::from_str("rec.testnet").unwrap();
+        let account = AccountId::from_str("victim.testnet").unwrap();
+        let (_, owner_a) = keypair();
+        let (_, owner_b) = keypair();
+        assert_ne!(
+            verdict_message(&contract, &account, &owner_a, 0, true),
+            verdict_message(&contract, &account, &owner_b, 0, true)
+        );
+    }
+
+    #[test]
     fn request_and_verdict_messages_are_domain_separated() {
         use std::str::FromStr;
         ctx();
@@ -139,7 +155,7 @@ mod tests {
         let account = AccountId::from_str("victim.testnet").unwrap();
         let (_, new_owner) = keypair();
         let req = request_message(&contract, &account, &new_owner, 0);
-        let verd = verdict_message(&contract, &account, 0, true);
+        let verd = verdict_message(&contract, &account, &new_owner, 0, true);
         assert_eq!(req[0], DOMAIN_REQUEST);
         assert_eq!(verd[0], DOMAIN_VERDICT);
         assert_ne!(req[0], verd[0]);

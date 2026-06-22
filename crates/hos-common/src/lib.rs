@@ -1,6 +1,8 @@
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{CurveType, PublicKey};
 
+pub const FT_STORAGE_DEPOSIT_YOCTO: u128 = 1_250_000_000_000_000_000_000;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(crate = "near_sdk::serde")]
 pub enum MintOutcome {

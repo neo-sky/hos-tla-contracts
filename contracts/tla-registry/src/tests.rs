@@ -712,6 +712,74 @@ mod reclaim {
         let view = c.get_sub_account(acc(TLA), "alice".to_string()).unwrap();
         assert!(matches!(view.lifecycle, LifecycleStatus::Reclaimable));
     }
+
+    #[test]
+    fn reclaim_finalize_rejected_while_sale_settling() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let expires = c
+            .get_sub_account(acc(TLA), "alice".to_string())
+            .unwrap()
+            .expires_at
+            .0 as u64;
+        ctx(ALICE, 1, 2);
+        c.list_sub_account(acc(TLA), "alice".to_string(), U128(10), parked_key())
+            .unwrap();
+        ctx(BOB, 10, 2);
+        let _ = c
+            .buy_sub_account(acc(TLA), "alice".to_string(), parked_key())
+            .unwrap();
+        ctx(BOB, 0, expires + GRACE_NS + DAY_NS);
+        assert!(matches!(
+            c.reclaim_finalize(acc(TLA), "alice".to_string()),
+            Err(ContractError::SaleInProgress)
+        ));
+    }
+
+    #[test]
+    fn double_reclaim_does_not_double_decrement() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        assert_eq!(c.get_stats().sub_account_count, 1);
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE));
+        assert_eq!(c.get_stats().sub_account_count, 0);
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE));
+        assert_eq!(c.get_stats().sub_account_count, 0);
+    }
+
+    #[test]
+    fn self_mother_does_not_block_reclaim() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let sub = format!("alice.{TLA}");
+        ctx(ALICE, 1, 2);
+        c.set_mother(acc(&sub)).unwrap();
+        assert!(c.is_mother(acc(&sub)));
+        let expires = c
+            .get_sub_account(acc(TLA), "alice".to_string())
+            .unwrap()
+            .expires_at
+            .0 as u64;
+        ctx(BOB, 0, expires + GRACE_NS + DAY_NS);
+        let _ = c
+            .reclaim_finalize(acc(TLA), "alice".to_string())
+            .expect("self-anchored sub must still be reclaimable");
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE));
+        assert!(
+            !c.is_mother(acc(&sub)),
+            "the self-anchor must be cleaned up on reclaim"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "grace period too short")]
+    fn new_rejects_short_grace_period() {
+        ctx(ADMIN, 0, 0);
+        let _ = TlaRegistry::new(acc(ADMIN), acc(HOSEXT), parked_key(), U64(0));
+    }
 }
 
 mod refunds_and_admin {

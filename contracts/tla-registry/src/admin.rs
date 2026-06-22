@@ -266,4 +266,21 @@ impl TlaRegistry {
         .emit();
         Ok(())
     }
+
+    #[handle_result]
+    pub fn admin_clear_settling(
+        &mut self,
+        tla_id: AccountId,
+        name: String,
+    ) -> Result<(), ContractError> {
+        self.assert_admin()?;
+        let key = sub_account_key(&tla_id, &name);
+        self.clear_settling(&key);
+        Event::SettlingCleared {
+            full_name: key,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
 }

@@ -30,7 +30,6 @@ fn native_target() -> Target {
     Target::Native {
         mpc_public_key: PublicKey::from_str("ed25519:DZdWKDt29SBdPqeyfykg8TFF5Zkb5Qzdd6FJiJMvftZG")
             .unwrap(),
-        derivation_path: "recover/victim".to_string(),
     }
 }
 
@@ -82,12 +81,14 @@ fn attest(sk: &SigningKey, new_owner: &PublicKey, round: u64) -> Base64VecU8 {
 fn watcher_sigs(
     sks: &[&SigningKey],
     pks: &[PublicKey],
+    new_owner: &PublicKey,
     round: u64,
     silent: bool,
 ) -> Vec<WatcherSignature> {
     let msg = proof::verdict_message(
         &AccountId::from_str(OWNER).unwrap(),
         &account_id(),
+        new_owner,
         round,
         silent,
     );
@@ -121,7 +122,7 @@ fn happy_path_to_approved() {
     let _ = c.submit_verdict(
         account_id(),
         true,
-        watcher_sigs(&[&w1, &w2], &[wk1, wk2], 0, true),
+        watcher_sigs(&[&w1, &w2], &[wk1, wk2], &new_owner, 0, true),
     );
 
     assert!(matches!(
@@ -206,7 +207,11 @@ fn verdict_rejected_before_timelock() {
         attest(&mother, &new_owner, 0),
     );
     ctx("anyone.testnet", 2, 2);
-    let _ = c.submit_verdict(account_id(), true, watcher_sigs(&[&w1], &[wk1], 0, true));
+    let _ = c.submit_verdict(
+        account_id(),
+        true,
+        watcher_sigs(&[&w1], &[wk1], &new_owner, 0, true),
+    );
 }
 
 #[test]
@@ -226,7 +231,11 @@ fn verdict_rejected_without_quorum() {
         attest(&mother, &new_owner, 0),
     );
     ctx("anyone.testnet", 61 * NS_PER_SEC, 5);
-    let _ = c.submit_verdict(account_id(), true, watcher_sigs(&[&w1], &[wk1], 0, true));
+    let _ = c.submit_verdict(
+        account_id(),
+        true,
+        watcher_sigs(&[&w1], &[wk1], &new_owner, 0, true),
+    );
 }
 
 #[test]
@@ -244,7 +253,11 @@ fn active_verdict_cancels_back_to_idle() {
         attest(&mother, &new_owner, 0),
     );
     ctx("anyone.testnet", 61 * NS_PER_SEC, 5);
-    let _ = c.submit_verdict(account_id(), false, watcher_sigs(&[&w1], &[wk1], 0, false));
+    let _ = c.submit_verdict(
+        account_id(),
+        false,
+        watcher_sigs(&[&w1], &[wk1], &new_owner, 0, false),
+    );
     assert!(matches!(
         c.accounts.get(&account_id()).unwrap().phase,
         Phase::Idle
@@ -294,7 +307,11 @@ fn wallet_verdict_approves_and_freezes() {
         attest(&mother, &new_owner, 0),
     );
     ctx("anyone.testnet", 61 * NS_PER_SEC, 5);
-    let out = c.submit_verdict(account_id(), true, watcher_sigs(&[&w1], &[wk1], 0, true));
+    let out = c.submit_verdict(
+        account_id(),
+        true,
+        watcher_sigs(&[&w1], &[wk1], &new_owner, 0, true),
+    );
     assert!(matches!(out, PromiseOrValue::Promise(_)));
     assert!(matches!(
         c.accounts.get(&account_id()).unwrap().phase,
@@ -322,7 +339,11 @@ fn approve_wallet_recovery(
         attest(mother, &new_owner, 0),
     );
     ctx("anyone.testnet", 61 * NS_PER_SEC, 5);
-    let _ = c.submit_verdict(account_id(), true, watcher_sigs(&[w1], &[wk1], 0, true));
+    let _ = c.submit_verdict(
+        account_id(),
+        true,
+        watcher_sigs(&[w1], &[wk1], &new_owner, 0, true),
+    );
     c.on_frozen(account_id(), 0, Ok(()));
     new_owner
 }
@@ -505,7 +526,11 @@ fn approve_freeze_rejection_cancels() {
         attest(&mother, &new_owner, 0),
     );
     ctx("anyone.testnet", 61 * NS_PER_SEC, 5);
-    let _ = c.submit_verdict(account_id(), true, watcher_sigs(&[&w1], &[wk1], 0, true));
+    let _ = c.submit_verdict(
+        account_id(),
+        true,
+        watcher_sigs(&[&w1], &[wk1], &new_owner, 0, true),
+    );
     c.on_frozen(account_id(), 0, Err(PromiseError::Failed));
     assert!(matches!(
         c.accounts.get(&account_id()).unwrap().phase,
@@ -614,7 +639,11 @@ fn approve_native_recovery(
         attest(mother, &new_owner, 0),
     );
     ctx("anyone.testnet", 61 * NS_PER_SEC, 5);
-    let _ = c.submit_verdict(account_id(), true, watcher_sigs(&[w1], &[wk1], 0, true));
+    let _ = c.submit_verdict(
+        account_id(),
+        true,
+        watcher_sigs(&[w1], &[wk1], &new_owner, 0, true),
+    );
     new_owner
 }
 
@@ -813,4 +842,81 @@ fn reinstall_rejected_while_in_flight() {
     let (_, mother_pk2) = keypair();
     ctx(OWNER, 0, 2);
     c.install_policy(account_id(), native_target(), mother_pk2, 60);
+}
+
+#[test]
+#[should_panic(expected = "timelock below minimum")]
+fn install_rejects_zero_timelock() {
+    let (_, wk1) = keypair();
+    let (_, mother_pk) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    ctx(OWNER, 0, 0);
+    c.install_policy(account_id(), native_target(), mother_pk, 0);
+}
+
+#[test]
+#[should_panic(expected = "duplicate watcher key")]
+fn new_rejects_duplicate_watchers() {
+    let (_, wk1) = keypair();
+    let _ = deploy(&[wk1.clone(), wk1], 1);
+}
+
+#[test]
+#[should_panic(expected = "watcher quorum not met")]
+fn verdict_over_wrong_new_owner_rejected() {
+    let (w1, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1.clone()], 1);
+    install(&mut c, mother_pk);
+    let (_, new_owner) = keypair();
+    let (_, other) = keypair();
+    ctx("anyone.testnet", 1, 1);
+    c.request_recovery(
+        account_id(),
+        new_owner.clone(),
+        U64(0),
+        attest(&mother, &new_owner, 0),
+    );
+    ctx("anyone.testnet", 61 * NS_PER_SEC, 5);
+    let _ = c.submit_verdict(
+        account_id(),
+        true,
+        watcher_sigs(&[&w1], &[wk1], &other, 0, true),
+    );
+}
+
+#[test]
+fn round_preserved_across_transfer_and_reinstall() {
+    let (_, wk1) = keypair();
+    let (mother, mother_pk) = keypair();
+    let mut c = deploy(&[wk1], 1);
+    install(&mut c, mother_pk);
+    let (_, new_owner) = keypair();
+    ctx("anyone.testnet", 1, 1);
+    c.request_recovery(
+        account_id(),
+        new_owner.clone(),
+        U64(0),
+        attest(&mother, &new_owner, 0),
+    );
+    ctx(TRANSFER_AUTHORITY, 0, 2);
+    c.on_wallet_transferred(account_id());
+    assert!(c.accounts.get(&account_id()).is_none());
+    let (_, mother_pk2) = keypair();
+    install(&mut c, mother_pk2);
+    assert_eq!(
+        c.round_of(account_id()),
+        Some(1),
+        "round must not reset to 0 across transfer+reinstall (verdict-replay defense)"
+    );
+}
+
+#[test]
+fn expected_native_path_is_account_scoped() {
+    let (_, wk1) = keypair();
+    let c = deploy(&[wk1], 1);
+    let a = AccountId::from_str("alice.tla.testnet").unwrap();
+    let b = AccountId::from_str("bob.tla.testnet").unwrap();
+    assert_ne!(c.expected_native_path(a.clone()), c.expected_native_path(b));
+    assert_eq!(c.expected_native_path(a), "hos-recovery/alice.tla.testnet");
 }

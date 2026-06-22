@@ -4,12 +4,14 @@ mod proof;
 mod state;
 mod tx;
 
+use std::collections::BTreeSet;
+
 use near_sdk::json_types::{Base58CryptoHash, Base64VecU8, U64};
 use near_sdk::serde_json::{json, Value};
 use near_sdk::store::LookupMap;
 use near_sdk::{
-    env, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise, PromiseError,
-    PromiseOrValue, PublicKey,
+    env, near, require, AccountId, CurveType, Gas, NearToken, PanicOnDefault, Promise,
+    PromiseError, PromiseOrValue, PublicKey,
 };
 
 use crate::events::Event;
@@ -21,6 +23,7 @@ const FREEZE_GAS: Gas = Gas::from_tgas(15);
 const CALLBACK_GAS: Gas = Gas::from_tgas(20);
 const ED25519_DOMAIN: u64 = 1;
 const NS_PER_SEC: u64 = 1_000_000_000;
+const MIN_TIMELOCK_SECS: u32 = 60;
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
@@ -31,6 +34,7 @@ pub struct MpcRecovery {
     watchers: Vec<PublicKey>,
     threshold: u32,
     accounts: LookupMap<AccountId, Account>,
+    round_floor: LookupMap<AccountId, u64>,
 }
 
 #[near(serializers = [json])]
@@ -59,6 +63,10 @@ impl MpcRecovery {
             threshold > 0 && (threshold as usize) <= watchers.len(),
             error::BAD_THRESHOLD
         );
+        let mut seen = BTreeSet::new();
+        for watcher in &watchers {
+            require!(seen.insert(watcher.clone()), error::DUPLICATE_WATCHER);
+        }
         Self {
             owner,
             signer,
@@ -66,6 +74,7 @@ impl MpcRecovery {
             watchers,
             threshold,
             accounts: LookupMap::new(b"a"),
+            round_floor: LookupMap::new(b"r"),
         }
     }
 
@@ -80,12 +89,22 @@ impl MpcRecovery {
             env::predecessor_account_id() == self.owner,
             error::ONLY_OWNER
         );
+        require!(
+            timelock_secs >= MIN_TIMELOCK_SECS,
+            error::TIMELOCK_TOO_SHORT
+        );
+        if let Target::Native { mpc_public_key } = &target {
+            require!(
+                mpc_public_key.curve_type() == CurveType::ED25519,
+                error::MPC_NOT_ED25519
+            );
+        }
         let round = match self.accounts.get(&account) {
             Some(existing) => {
                 require!(matches!(existing.phase, Phase::Idle), error::NOT_IDLE);
                 existing.round
             }
-            None => 0,
+            None => self.round_floor.get(&account).copied().unwrap_or(0),
         };
         self.accounts.insert(
             account.clone(),
@@ -127,12 +146,17 @@ impl MpcRecovery {
         );
         let round = entry.round;
         entry.phase = Phase::Requested {
-            new_owner,
+            new_owner: new_owner.clone(),
             round,
             requested_at: env::block_timestamp(),
         };
         entry.round += 1;
-        Event::Requested { account, round }.emit();
+        Event::Requested {
+            account,
+            round,
+            new_owner,
+        }
+        .emit();
     }
 
     pub fn submit_verdict(
@@ -161,10 +185,15 @@ impl MpcRecovery {
                 >= requested_at + (entry.policy.timelock_secs as u64) * NS_PER_SEC,
             error::TIMELOCK
         );
-        let message = proof::verdict_message(&contract, &account, round, silent);
+        let message = proof::verdict_message(&contract, &account, &new_owner, round, silent);
         let sigs: Vec<(PublicKey, [u8; 64])> = signatures
             .into_iter()
-            .map(|w| (w.public_key, into_sig(w.signature.into())))
+            .filter_map(|w| {
+                let bytes: Vec<u8> = w.signature.into();
+                <[u8; 64]>::try_from(bytes.as_slice())
+                    .ok()
+                    .map(|sig| (w.public_key, sig))
+            })
             .collect();
         require!(
             proof::verify_quorum(&message, &sigs, &watchers, threshold),
@@ -172,7 +201,7 @@ impl MpcRecovery {
         );
         if !silent {
             entry.phase = Phase::Idle;
-            Event::Cancelled { account, round }.emit();
+            Event::Canceled { account, round }.emit();
             return PromiseOrValue::Value(());
         }
         match entry.policy.target.clone() {
@@ -219,7 +248,7 @@ impl MpcRecovery {
             Event::Approved { account, round }.emit();
         } else {
             entry.phase = Phase::Idle;
-            Event::Cancelled { account, round }.emit();
+            Event::Canceled { account, round }.emit();
         }
     }
 
@@ -247,13 +276,9 @@ impl MpcRecovery {
             round,
         };
         match entry.policy.target.clone() {
-            Target::Native {
-                mpc_public_key,
-                derivation_path,
-            } => self.sign_add_key(
+            Target::Native { mpc_public_key } => self.sign_add_key(
                 &account,
                 &mpc_public_key,
-                derivation_path,
                 nonce.0,
                 block_hash.into(),
                 &new_owner,
@@ -413,16 +438,33 @@ impl MpcRecovery {
         self.accounts.get(&account).map(|a| a.round)
     }
 
+    pub fn pending_target(&self, account: AccountId) -> Option<String> {
+        self.accounts.get(&account).and_then(|a| match &a.phase {
+            Phase::Requested { new_owner, .. }
+            | Phase::Approving { new_owner, .. }
+            | Phase::Approved { new_owner, .. }
+            | Phase::Resolving { new_owner, .. } => Some(new_owner.to_string()),
+            Phase::Idle => None,
+        })
+    }
+
+    pub fn expected_native_path(&self, account: AccountId) -> String {
+        native_path(&account)
+    }
+
     pub fn on_wallet_transferred(&mut self, wallet: AccountId) {
         require!(
             env::predecessor_account_id() == self.transfer_authority,
             error::ONLY_TRANSFER_AUTHORITY
         );
-        let removable = match self.accounts.get(&wallet) {
-            Some(account) => matches!(account.phase, Phase::Idle | Phase::Requested { .. }),
-            None => false,
+        let preserved_round = match self.accounts.get(&wallet) {
+            Some(account) if matches!(account.phase, Phase::Idle | Phase::Requested { .. }) => {
+                Some(account.round)
+            }
+            _ => None,
         };
-        if removable {
+        if let Some(round) = preserved_round {
+            self.round_floor.insert(wallet.clone(), round);
             self.accounts.remove(&wallet);
             Event::PolicyReset { account: wallet }.emit();
         }
@@ -433,12 +475,12 @@ impl MpcRecovery {
         &self,
         account: &AccountId,
         mpc_public_key: &PublicKey,
-        path: String,
         nonce: u64,
         block_hash: [u8; 32],
         new_owner: &PublicKey,
         round: u64,
     ) -> Promise {
+        let path = native_path(account);
         let unsigned = tx::add_key_tx(account, mpc_public_key, nonce, &block_hash, new_owner);
         let hash_hex = tx::to_hex(&env::sha256(&unsigned));
         let args = json!({"request": {"path": path, "payload_v2": {"Eddsa": hash_hex}, "domain_id": ED25519_DOMAIN}})
@@ -540,6 +582,10 @@ fn unfreeze(active_signer: AccountId, account: &AccountId) -> Promise {
 
 fn ed25519_base58(key: &PublicKey) -> String {
     hos_common::ed25519_base58(key).unwrap_or_else(|| env::panic_str(error::NOT_ED25519))
+}
+
+fn native_path(account: &AccountId) -> String {
+    format!("hos-recovery/{account}")
 }
 
 fn into_sig(bytes: Vec<u8>) -> [u8; 64] {

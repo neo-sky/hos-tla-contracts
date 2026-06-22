@@ -29,8 +29,10 @@ const GAS_FOR_EXTENSION_CALL: Gas = Gas::from_tgas(20);
 const GAS_FOR_SETTLE_CB: Gas = Gas::from_tgas(8);
 const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(10);
 
-const STORAGE_DEPOSIT_AMOUNT: NearToken = NearToken::from_yoctonear(1_250_000_000_000_000_000_000);
-const MIN_SWEEP_ATTACHED: NearToken = NearToken::from_yoctonear(1_250_000_000_000_000_000_000 + 1);
+const STORAGE_DEPOSIT_AMOUNT: NearToken =
+    NearToken::from_yoctonear(hos_common::FT_STORAGE_DEPOSIT_YOCTO);
+const MIN_SWEEP_ATTACHED: NearToken =
+    NearToken::from_yoctonear(hos_common::FT_STORAGE_DEPOSIT_YOCTO + 1);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 
 const EXT_QUERY_FAILED: &str = "could not read wallet extension set";
@@ -293,7 +295,7 @@ impl HosExtension {
                     reason: "balance_query_failed".to_string(),
                 }
                 .emit();
-                return PromiseOrValue::Value(());
+                return PromiseOrValue::Promise(self.refund_registry(MIN_SWEEP_ATTACHED));
             }
         };
         if balance == 0 {
@@ -303,7 +305,7 @@ impl HosExtension {
                 reason: "zero_balance".to_string(),
             }
             .emit();
-            return PromiseOrValue::Value(());
+            return PromiseOrValue::Promise(self.refund_registry(MIN_SWEEP_ATTACHED));
         }
 
         PromiseOrValue::Promise(
@@ -334,7 +336,7 @@ impl HosExtension {
                 reason: "storage_deposit_failed".to_string(),
             }
             .emit();
-            return PromiseOrValue::Value(());
+            return PromiseOrValue::Promise(self.refund_registry(MIN_SWEEP_ATTACHED));
         }
 
         let request = sweep_request(&ft, &destination, balance);
@@ -427,6 +429,10 @@ impl HosExtension {
             return Err(ContractError::Paused);
         }
         Ok(())
+    }
+
+    fn refund_registry(&self, amount: NearToken) -> Promise {
+        Promise::new(self.registry.clone()).transfer(amount)
     }
 }
 
@@ -594,7 +600,7 @@ mod tests {
         let mut c = deploy();
         ctx(acc("hos-extension.testnet").as_str(), 0);
         let out = c.after_balance_for_sweep(acc(WALLET), acc(TOKEN), acc(DEST), Ok(U128(0)));
-        assert!(matches!(out, PromiseOrValue::Value(())));
+        assert!(matches!(out, PromiseOrValue::Promise(_)));
     }
 
     #[test]
@@ -607,7 +613,7 @@ mod tests {
             acc(DEST),
             Err(PromiseError::Failed),
         );
-        assert!(matches!(out, PromiseOrValue::Value(())));
+        assert!(matches!(out, PromiseOrValue::Promise(_)));
     }
 
     #[test]
