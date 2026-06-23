@@ -20,6 +20,12 @@ pub trait FungibleToken {
 }
 
 #[allow(dead_code)]
+#[ext_contract(ext_active_signer)]
+pub trait ActiveSigner {
+    fn signer_of(&self, wallet: AccountId) -> Option<String>;
+}
+
+#[allow(dead_code)]
 #[ext_contract(ext_tla_manager)]
 pub trait TlaManager {
     fn create_sub_account(&mut self, name: String, owner_public_key: PublicKey);

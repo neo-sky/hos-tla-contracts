@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup show
+          rustup component add rustfmt clippy
+          rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: >
+          cargo fmt --check
+          -p hos-common -p active-signer -p hos-extension -p mpc-recovery
+          -p tla-manager -p tla-registry -p test-ft
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --workspace
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup show
+          rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-near
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+
+      - name: Build contracts
+        run: |
+          for crate in active-signer hos-extension mpc-recovery tla-manager tla-registry; do
+            (cd "contracts/$crate" && cargo near build non-reproducible-wasm --no-abi)
+          done
+
+      - name: Record wasm hashes
+        run: |
+          for wasm in target/near/*/*.wasm; do
+            sha256sum "$wasm"
+          done
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup show
+          rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-near
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+
+      - name: Build contracts
+        run: |
+          for crate in active-signer hos-extension mpc-recovery tla-manager tla-registry test-ft; do
+            (cd "$(find contracts dev-contracts -maxdepth 1 -name "$crate" -type d | head -1)" && cargo near build non-reproducible-wasm --no-abi)
+          done
+          (cd contracts/hos-wallet && cargo near build non-reproducible-wasm --locked --no-default-features --features=contract --no-abi)
+
+      - name: Integration tests
+        run: cargo test --manifest-path integration/Cargo.toml
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: RustSec advisory scan
+        run: cargo audit

@@ -3,7 +3,7 @@ use crate::events::Event;
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
 use near_sdk::json_types::U128;
-use near_sdk::{env, near, AccountId, CurveType, PublicKey};
+use near_sdk::{env, near, AccountId, PublicKey};
 
 const MAX_ALLOWLIST_SIZE: u32 = 16;
 
@@ -167,7 +167,7 @@ impl TlaRegistry {
     #[handle_result]
     pub fn set_parked_signer_pubkey(&mut self, pubkey: PublicKey) -> Result<(), ContractError> {
         self.assert_admin()?;
-        if pubkey.curve_type() != CurveType::ED25519 {
+        if !hos_common::is_ed25519(&pubkey) {
             return Err(ContractError::NotEd25519);
         }
         self.parked_signer_pubkey = pubkey.clone();

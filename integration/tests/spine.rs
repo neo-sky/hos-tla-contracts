@@ -515,6 +515,69 @@ async fn sold_recovery_wallet_cannot_be_clawed_back() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn voided_force_transfer_preserves_recovery_policy() -> Result<()> {
+    let h = setup().await?;
+    let owner = user_key(7);
+    let wallet = mint_wallet(&h, "alice", &owner).await?;
+
+    let mother = user_key(11);
+    h.admin
+        .call(h.mpc_recovery.id(), "install_policy")
+        .args_json(json!({
+            "account": wallet.id(),
+            "target": { "Wallet": {
+                "active_signer": h.active_signer.id(),
+                "bound_owner": ws_pubkey(&owner),
+            }},
+            "attestation_key": ws_pubkey(&mother),
+            "timelock_secs": 60,
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let stale = user_key(50);
+    let buyer = user_key(8);
+    h.registry
+        .call(h.hos_extension.id(), "force_transfer")
+        .args_json(json!({
+            "wallet": wallet.id(),
+            "new_public_key": raw_base58(&buyer),
+            "expected_current": raw_base58(&stale),
+        }))
+        .gas(Gas::from_tgas(60))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let signer: Option<String> = h
+        .active_signer
+        .view("signer_of")
+        .args_json(json!({ "wallet": wallet.id() }))
+        .await?
+        .json()?;
+    assert_eq!(
+        signer,
+        Some(raw_base58(&owner)),
+        "a CAS-void force_transfer must leave the wallet signer unchanged"
+    );
+
+    let round_after: Option<u64> = h
+        .mpc_recovery
+        .view("round_of")
+        .args_json(json!({ "account": wallet.id() }))
+        .await?
+        .json()?;
+    assert_eq!(
+        round_after,
+        Some(0),
+        "a voided transfer must not erase the installed recovery policy"
+    );
+
+    Ok(())
+}
+
 const ZERO_HASH: &str = "11111111111111111111111111111111";
 
 fn push_len_str(buf: &mut Vec<u8>, s: &str) {

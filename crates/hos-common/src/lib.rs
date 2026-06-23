@@ -4,6 +4,10 @@ use near_sdk::{env, CurveType, PublicKey};
 pub const FT_STORAGE_DEPOSIT_YOCTO: u128 = 1_250_000_000_000_000_000_000;
 pub const NOT_ED25519: &str = "owner key must be ed25519";
 
+pub fn is_ed25519(key: &PublicKey) -> bool {
+    key.curve_type() == CurveType::ED25519
+}
+
 pub fn ed25519_base58_or_panic(key: &PublicKey) -> String {
     ed25519_base58(key).unwrap_or_else(|| env::panic_str(NOT_ED25519))
 }
@@ -23,7 +27,7 @@ pub enum MintOutcome {
 }
 
 pub fn ed25519_base58(key: &PublicKey) -> Option<String> {
-    if key.curve_type() != CurveType::ED25519 {
+    if !is_ed25519(key) {
         return None;
     }
     key.to_string().strip_prefix("ed25519:").map(str::to_string)

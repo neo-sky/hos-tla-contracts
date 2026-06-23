@@ -9,6 +9,7 @@ use std::str::FromStr;
 
 const ADMIN: &str = "hos.testnet";
 const HOSEXT: &str = "hos-extension.testnet";
+const SIGNER: &str = "active-signer.testnet";
 const TLA: &str = "mytla";
 const ALICE: &str = "alice.testnet";
 const BOB: &str = "bob.testnet";
@@ -22,6 +23,10 @@ fn acc(s: &str) -> AccountId {
 
 fn parked_key() -> PublicKey {
     PublicKey::from_str(PARKED_KEY).unwrap()
+}
+
+fn signer_match(key: &PublicKey) -> Result<Option<String>, PromiseError> {
+    Ok(Some(key.to_string()))
 }
 
 fn ctx(predecessor: &str, deposit: u128, ts: u64) {
@@ -48,7 +53,13 @@ fn ctx_callback(result: near_sdk::PromiseResult) {
 
 fn deploy() -> TlaRegistry {
     ctx(ADMIN, 0, 0);
-    TlaRegistry::new(acc(ADMIN), acc(HOSEXT), parked_key(), U64(GRACE_NS))
+    TlaRegistry::new(
+        acc(ADMIN),
+        acc(HOSEXT),
+        acc(SIGNER),
+        parked_key(),
+        U64(GRACE_NS),
+    )
 }
 
 fn deploy_with_open_tla() -> TlaRegistry {
@@ -449,8 +460,18 @@ mod marketplace {
 
     fn list_alice(c: &mut TlaRegistry, price: u128) {
         ctx(ALICE, 1, 2);
-        c.list_sub_account(acc(TLA), "alice".to_string(), U128(price), parked_key())
+        let _ = c
+            .list_sub_account(acc(TLA), "alice".to_string(), U128(price), parked_key())
             .unwrap();
+        ctx(ALICE, 0, 2);
+        c.on_listing_verified(
+            acc(TLA),
+            "alice".to_string(),
+            U128(price),
+            parked_key(),
+            acc(ALICE),
+            signer_match(&parked_key()),
+        );
     }
 
     #[test]
@@ -613,25 +634,75 @@ mod marketplace {
         c.unlist_sub_account(acc(TLA), "alice".to_string()).unwrap();
     }
 
+    fn accept_alice(c: &mut TlaRegistry, buyer: AccountId, price: u128) {
+        ctx(ALICE, 1, 2);
+        let _ = c
+            .accept_offer(
+                acc(TLA),
+                "alice".to_string(),
+                buyer.clone(),
+                U128(price),
+                parked_key(),
+            )
+            .unwrap();
+        ctx(ALICE, 0, 2);
+        c.on_offer_verified(
+            acc(TLA),
+            "alice".to_string(),
+            buyer,
+            U128(price),
+            parked_key(),
+            acc(ALICE),
+            signer_match(&parked_key()),
+        );
+    }
+
     #[test]
     fn accepted_offer_settles_at_offer_price() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
-        ctx(ALICE, 1, 2);
-        c.accept_offer(
-            acc(TLA),
-            "alice".to_string(),
-            acc(BOB),
-            U128(50),
-            parked_key(),
-        )
-        .unwrap();
+        accept_alice(&mut c, acc(BOB), 50);
         ctx(BOB, 50, 2);
         let _ = c
             .buy_sub_account(acc(TLA), "alice".to_string(), parked_key())
             .unwrap();
         let offer = c.get_accepted_offer(acc(TLA), "alice".to_string()).unwrap();
         assert!(offer.settling);
+    }
+
+    #[test]
+    fn list_rejected_when_owner_key_not_current() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(ALICE, 1, 2);
+        let _ = c
+            .list_sub_account(acc(TLA), "alice".to_string(), U128(10), parked_key())
+            .unwrap();
+        ctx(ALICE, 0, 2);
+        c.on_listing_verified(
+            acc(TLA),
+            "alice".to_string(),
+            U128(10),
+            parked_key(),
+            acc(ALICE),
+            Ok(Some("DifferentKeyThatDoesNotMatch".to_string())),
+        );
+        assert!(c.get_listing(acc(TLA), "alice".to_string()).is_none());
+    }
+
+    #[test]
+    fn list_rejects_non_ed25519_key() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(ALICE, 1, 2);
+        let secp = PublicKey::from_str(
+            "secp256k1:qMoRgcoXai4mBPsdbHi1wfyxF9TdbPCF4qSDQTRP3TfescSRoUdSx6nmeQoN3aiwGzwMyGXAb1gUjBTv5AY8DXj",
+        )
+        .unwrap();
+        assert!(matches!(
+            c.list_sub_account(acc(TLA), "alice".to_string(), U128(10), secp),
+            Err(ContractError::NotEd25519)
+        ));
     }
 
     #[test]
@@ -723,8 +794,18 @@ mod reclaim {
             .expires_at
             .0 as u64;
         ctx(ALICE, 1, 2);
-        c.list_sub_account(acc(TLA), "alice".to_string(), U128(10), parked_key())
+        let _ = c
+            .list_sub_account(acc(TLA), "alice".to_string(), U128(10), parked_key())
             .unwrap();
+        ctx(ALICE, 0, 2);
+        c.on_listing_verified(
+            acc(TLA),
+            "alice".to_string(),
+            U128(10),
+            parked_key(),
+            acc(ALICE),
+            signer_match(&parked_key()),
+        );
         ctx(BOB, 10, 2);
         let _ = c
             .buy_sub_account(acc(TLA), "alice".to_string(), parked_key())
@@ -778,7 +859,7 @@ mod reclaim {
     #[should_panic(expected = "grace period too short")]
     fn new_rejects_short_grace_period() {
         ctx(ADMIN, 0, 0);
-        let _ = TlaRegistry::new(acc(ADMIN), acc(HOSEXT), parked_key(), U64(0));
+        let _ = TlaRegistry::new(acc(ADMIN), acc(HOSEXT), acc(SIGNER), parked_key(), U64(0));
     }
 }
 

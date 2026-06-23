@@ -22,7 +22,7 @@ use near_sdk::borsh::BorshSerialize;
 use near_sdk::json_types::{U128, U64};
 use near_sdk::store::{IterableMap, IterableSet, LookupMap};
 use near_sdk::{
-    env, is_promise_success, near, require, AccountId, BorshStorageKey, CurveType, Gas, NearToken,
+    env, is_promise_success, near, require, AccountId, BorshStorageKey, Gas, NearToken,
     PanicOnDefault, Promise, PublicKey,
 };
 
@@ -72,6 +72,7 @@ pub struct TlaRegistry {
     pub(crate) parked_names: LookupMap<String, ParkedEntry>,
     pub(crate) signer_pending: LookupMap<String, PublicKey>,
     pub(crate) hos_extension: AccountId,
+    pub(crate) active_signer: AccountId,
     pub(crate) parked_signer_pubkey: PublicKey,
     pub(crate) grace_period_ns: u64,
 }
@@ -82,11 +83,12 @@ impl TlaRegistry {
     pub fn new(
         admin: AccountId,
         hos_extension: AccountId,
+        active_signer: AccountId,
         parked_signer_pubkey: PublicKey,
         grace_period_ns: U64,
     ) -> Self {
         require!(
-            parked_signer_pubkey.curve_type() == CurveType::ED25519,
+            hos_common::is_ed25519(&parked_signer_pubkey),
             "parked signer key must be ed25519"
         );
         require!(
@@ -117,6 +119,7 @@ impl TlaRegistry {
             parked_names: LookupMap::new(StorageKey::ParkedNames),
             signer_pending: LookupMap::new(StorageKey::SignerPending),
             hos_extension,
+            active_signer,
             parked_signer_pubkey,
             grace_period_ns: grace_period_ns.0,
         }

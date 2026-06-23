@@ -15,3 +15,7 @@ pub const BAD_SIGNATURE_LEN: &str = "signature must be 64 bytes";
 pub const TIMELOCK_TOO_SHORT: &str = "timelock below minimum";
 pub const DUPLICATE_WATCHER: &str = "duplicate watcher key";
 pub const MPC_NOT_ED25519: &str = "native mpc key must be ed25519";
+pub const WATCHER_NOT_ED25519: &str = "watcher key must be ed25519";
+pub const ATTESTATION_NOT_ED25519: &str = "attestation key must be ed25519";
+pub const BOUND_OWNER_NOT_ED25519: &str = "bound owner key must be ed25519";
+pub const NEW_OWNER_NOT_ED25519: &str = "new owner key must be ed25519";

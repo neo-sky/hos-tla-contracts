@@ -18,6 +18,7 @@ use near_sdk::{
 const CONTRACT_VERSION: u8 = 1;
 
 const GAS_FOR_SWAP_OWNER: Gas = Gas::from_tgas(8);
+const GAS_FOR_SWAP_CB: Gas = Gas::from_tgas(10);
 const GAS_FOR_RESET: Gas = Gas::from_tgas(5);
 const GAS_FOR_EXT_QUERY: Gas = Gas::from_tgas(5);
 const GAS_FOR_EXT_VERIFY_CB: Gas = Gas::from_tgas(25);
@@ -240,12 +241,29 @@ impl HosExtension {
         if extensions != canonical {
             env::panic_str(NON_CANONICAL_EXTENSIONS);
         }
-        let _ = ext_mpc_recovery::ext(self.recovery.clone())
-            .with_static_gas(GAS_FOR_RESET)
-            .on_wallet_transferred(wallet.clone());
         ext_active_signer::ext(self.active_signer.clone())
             .with_static_gas(GAS_FOR_SWAP_OWNER)
-            .swap_owner(wallet, new_public_key, expected_current)
+            .swap_owner(wallet.clone(), new_public_key, expected_current)
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_SWAP_CB)
+                    .after_force_swap(wallet),
+            )
+    }
+
+    #[private]
+    pub fn after_force_swap(
+        &mut self,
+        wallet: AccountId,
+        #[callback_result] swapped: Result<bool, PromiseError>,
+    ) -> bool {
+        let transferred = matches!(swapped, Ok(true));
+        if transferred {
+            let _ = ext_mpc_recovery::ext(self.recovery.clone())
+                .with_static_gas(GAS_FOR_RESET)
+                .on_wallet_transferred(wallet);
+        }
+        transferred
     }
 
     #[payable]

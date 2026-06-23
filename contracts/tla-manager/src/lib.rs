@@ -4,8 +4,8 @@ mod events;
 use near_sdk::json_types::Base58CryptoHash;
 use near_sdk::serde_json::json;
 use near_sdk::{
-    env, ext_contract, near, require, AccountId, CryptoHash, CurveType, Gas, NearToken,
-    PanicOnDefault, Promise, PromiseError, PromiseOrValue, PublicKey,
+    env, ext_contract, near, require, AccountId, CryptoHash, Gas, NearToken, PanicOnDefault,
+    Promise, PromiseError, PromiseOrValue, PublicKey,
 };
 
 use crate::events::Event;
@@ -59,7 +59,7 @@ impl TlaManager {
         );
         require!(!name.is_empty() && !name.contains('.'), error::INVALID_NAME);
         require!(
-            owner_public_key.curve_type() == CurveType::ED25519,
+            hos_common::is_ed25519(&owner_public_key),
             hos_common::NOT_ED25519
         );
         let funding = env::attached_deposit();
@@ -154,7 +154,7 @@ impl TlaManager {
             error::ONLY_REGISTRY
         );
         require!(
-            owner_public_key.curve_type() == CurveType::ED25519,
+            hos_common::is_ed25519(&owner_public_key),
             hos_common::NOT_ED25519
         );
         ext_active_signer::ext(self.active_signer.clone())

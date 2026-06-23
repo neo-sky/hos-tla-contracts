@@ -78,8 +78,12 @@ tla-registry:
 
     new(admin: <council>,
         hos_extension: <hos-extension>,
+        active_signer: <active-signer>,
         parked_signer_pubkey: <ed25519-pubkey>,
         grace_period_ns: <ns>)
+
+The registry holds `active_signer` so it can verify a seller's supplied owner key
+against the wallet's live signer before a listing or accepted offer becomes buyable.
 
 A note on `mpc-recovery`'s owner: it gates `install_policy` and `abort_recovery`, and
 an abort can be time-sensitive (cancelling a recovery aimed at a user). A full
@@ -152,9 +156,14 @@ methods should be reachable. A single FullAccess key on a TLA account lets it sq
 grief signer slots under its namespace, so a hit here blocks launch until the key is
 removed.
 
-`mpc-recovery` owner, watcher set, and threshold match what you intended:
+`mpc-recovery` owner, signer, transfer authority, watcher set, and threshold match
+what you intended, read from chain:
 
-    near view <mpc-recovery> # confirm owner, watchers, threshold via the contract's views
+    near view <mpc-recovery> owner               # expect <council-or-recovery-ops>
+    near view <mpc-recovery> signer              # expect v1.signer
+    near view <mpc-recovery> transfer_authority  # expect <hos-extension>
+    near view <mpc-recovery> watchers            # expect the watcher pubkey set
+    near view <mpc-recovery> threshold           # expect <n>
 
 Code hashes match the reproducible build:
 

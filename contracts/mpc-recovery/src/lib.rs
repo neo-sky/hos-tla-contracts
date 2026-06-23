@@ -10,8 +10,8 @@ use near_sdk::json_types::{Base58CryptoHash, Base64VecU8, U64};
 use near_sdk::serde_json::{json, Value};
 use near_sdk::store::LookupMap;
 use near_sdk::{
-    env, near, require, AccountId, CurveType, Gas, NearToken, PanicOnDefault, Promise,
-    PromiseError, PromiseOrValue, PublicKey,
+    env, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise, PromiseError,
+    PromiseOrValue, PublicKey,
 };
 
 use crate::events::Event;
@@ -65,6 +65,7 @@ impl MpcRecovery {
         );
         let mut seen = BTreeSet::new();
         for watcher in &watchers {
+            require!(hos_common::is_ed25519(watcher), error::WATCHER_NOT_ED25519);
             require!(seen.insert(watcher.clone()), error::DUPLICATE_WATCHER);
         }
         Self {
@@ -93,11 +94,19 @@ impl MpcRecovery {
             timelock_secs >= MIN_TIMELOCK_SECS,
             error::TIMELOCK_TOO_SHORT
         );
-        if let Target::Native { mpc_public_key } = &target {
-            require!(
-                mpc_public_key.curve_type() == CurveType::ED25519,
+        require!(
+            hos_common::is_ed25519(&attestation_key),
+            error::ATTESTATION_NOT_ED25519
+        );
+        match &target {
+            Target::Native { mpc_public_key } => require!(
+                hos_common::is_ed25519(mpc_public_key),
                 error::MPC_NOT_ED25519
-            );
+            ),
+            Target::Wallet { bound_owner, .. } => require!(
+                hos_common::is_ed25519(bound_owner),
+                error::BOUND_OWNER_NOT_ED25519
+            ),
         }
         let round = match self.accounts.get(&account) {
             Some(existing) => {
@@ -135,6 +144,12 @@ impl MpcRecovery {
             .unwrap_or_else(|| env::panic_str(error::NO_POLICY));
         require!(matches!(entry.phase, Phase::Idle), error::NOT_IDLE);
         require!(round.0 == entry.round, error::STALE_ROUND);
+        if matches!(entry.policy.target, Target::Wallet { .. }) {
+            require!(
+                hos_common::is_ed25519(&new_owner),
+                error::NEW_OWNER_NOT_ED25519
+            );
+        }
         let message = proof::request_message(&contract, &account, &new_owner, entry.round);
         require!(
             proof::verify(
@@ -446,6 +461,26 @@ impl MpcRecovery {
 
     pub fn expected_native_path(&self, account: AccountId) -> String {
         native_path(&account)
+    }
+
+    pub fn owner(&self) -> AccountId {
+        self.owner.clone()
+    }
+
+    pub fn signer(&self) -> AccountId {
+        self.signer.clone()
+    }
+
+    pub fn transfer_authority(&self) -> AccountId {
+        self.transfer_authority.clone()
+    }
+
+    pub fn watchers(&self) -> Vec<PublicKey> {
+        self.watchers.clone()
+    }
+
+    pub fn threshold(&self) -> u32 {
+        self.threshold
     }
 
     pub fn on_wallet_transferred(&mut self, wallet: AccountId) {

@@ -1,7 +1,7 @@
 use crate::asset_gate::{ft_balance_fanout, ft_balances_clear, BalanceGate};
 use crate::error::ContractError;
 use crate::events::Event;
-use crate::interfaces::ext_hos_extension;
+use crate::interfaces::{ext_hos_extension, ext_tla_manager};
 use crate::mother::effective_sub_lifecycle;
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
@@ -9,6 +9,7 @@ use near_sdk::{env, is_promise_success, near, AccountId, Gas, NearToken, Promise
 
 const GAS_FOR_HOS_SWEEP: Gas = Gas::from_tgas(120);
 const GAS_FOR_HOS_FORCE_TRANSFER: Gas = Gas::from_tgas(45);
+const GAS_FOR_RETRY_INSTALL: Gas = Gas::from_tgas(20);
 const GAS_FOR_FINALIZE_CB: Gas = Gas::from_tgas(10);
 const GAS_FOR_BALANCES_CB_TOTAL: Gas = Gas::from_tgas(80);
 
@@ -128,6 +129,7 @@ impl TlaRegistry {
         }
         self.listings.remove(&key);
         self.accepted_offers.remove(&key);
+        self.signer_pending.remove(&key);
         self.sub_account_count = self.sub_account_count.saturating_sub(1);
         self.business_count_decrement_if_business(&tla_id);
         let now = env::block_timestamp();
@@ -196,13 +198,19 @@ impl TlaRegistry {
         name: String,
         destination: AccountId,
     ) -> Promise {
+        let key = sub_account_key(&tla_id, &name);
+        let finalize = Self::ext(env::current_account_id())
+            .with_static_gas(GAS_FOR_FINALIZE_CB)
+            .on_reclaim_finalized(tla_id.clone(), name, destination);
+        if self.signer_pending.contains_key(&key) {
+            return ext_tla_manager::ext(tla_id)
+                .with_static_gas(GAS_FOR_RETRY_INSTALL)
+                .retry_install(sub_account, self.parked_signer_pubkey.clone())
+                .then(finalize);
+        }
         ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_HOS_FORCE_TRANSFER)
             .force_transfer(sub_account, self.parked_signer_pubkey.clone(), None)
-            .then(
-                Self::ext(env::current_account_id())
-                    .with_static_gas(GAS_FOR_FINALIZE_CB)
-                    .on_reclaim_finalized(tla_id, name, destination),
-            )
+            .then(finalize)
     }
 }

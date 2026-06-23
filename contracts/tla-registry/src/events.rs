@@ -124,11 +124,24 @@ pub enum Event {
     #[event_version("1.0.0")]
     SubAccountUnlisted { full_name: String, by: AccountId },
     #[event_version("1.0.0")]
+    ListingRejected {
+        full_name: String,
+        seller: AccountId,
+        reason: String,
+    },
+    #[event_version("1.0.0")]
     OfferAccepted {
         full_name: String,
         buyer: AccountId,
         price_yocto: U128,
         seller: AccountId,
+    },
+    #[event_version("1.0.0")]
+    OfferRejected {
+        full_name: String,
+        buyer: AccountId,
+        seller: AccountId,
+        reason: String,
     },
     #[event_version("1.0.0")]
     OfferRevoked { full_name: String, by: AccountId },

@@ -2,7 +2,7 @@ use crate::asset_gate::{ft_balance_fanout, ft_balances_clear, BalanceGate};
 use crate::error::ContractError;
 use crate::events::Event;
 use crate::fees;
-use crate::interfaces::ext_hos_extension;
+use crate::interfaces::{ext_active_signer, ext_hos_extension};
 use crate::mother::effective_sub_lifecycle;
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
@@ -13,6 +13,8 @@ use near_sdk::{env, near, AccountId, Gas, Promise, PromiseOrValue, PublicKey};
 const GAS_FOR_FORCE_TRANSFER: Gas = Gas::from_tgas(45);
 const GAS_FOR_SOLD_CALLBACK: Gas = Gas::from_tgas(20);
 const GAS_FOR_BUY_BALANCES_CB: Gas = Gas::from_tgas(85);
+const GAS_FOR_SIGNER_QUERY: Gas = Gas::from_tgas(5);
+const GAS_FOR_VERIFY_CALLBACK: Gas = Gas::from_tgas(10);
 
 #[derive(Serialize, Deserialize)]
 #[serde(crate = "near_sdk::serde")]
@@ -37,17 +39,37 @@ impl TlaRegistry {
         name: String,
         price: U128,
         owner_key: PublicKey,
-    ) -> Result<(), ContractError> {
-        crate::assert_one_yocto()?;
-        self.assert_not_paused()?;
-        if price.0 == 0 {
-            return Err(ContractError::InvalidPrice);
-        }
+    ) -> Result<Promise, ContractError> {
+        let (sub_account, owner) = self.assert_listable(&tla_id, &name, price, &owner_key)?;
+        Ok(ext_active_signer::ext(self.active_signer.clone())
+            .with_static_gas(GAS_FOR_SIGNER_QUERY)
+            .signer_of(sub_account)
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_VERIFY_CALLBACK)
+                    .on_listing_verified(tla_id, name, price, owner_key, owner),
+            ))
+    }
+
+    #[private]
+    pub fn on_listing_verified(
+        &mut self,
+        tla_id: AccountId,
+        name: String,
+        price: U128,
+        owner_key: PublicKey,
+        seller: AccountId,
+        #[callback_result] current: Result<Option<String>, near_sdk::PromiseError>,
+    ) {
         let key = sub_account_key(&tla_id, &name);
-        self.assert_sale_idle(&key)?;
-        let owner = self.assert_sellable(&key, &tla_id)?;
-        if env::predecessor_account_id() != owner {
-            return Err(ContractError::OnlyOwner);
+        if !current_key_matches(&current, &owner_key) {
+            Event::ListingRejected {
+                full_name: key,
+                seller,
+                reason: "owner_key_not_current".to_string(),
+            }
+            .emit();
+            return;
         }
         self.listings.insert(
             key.clone(),
@@ -60,10 +82,9 @@ impl TlaRegistry {
         Event::SubAccountListed {
             full_name: key,
             price_yocto: price,
-            seller: owner,
+            seller,
         }
         .emit();
-        Ok(())
     }
 
     #[handle_result]
@@ -102,17 +123,40 @@ impl TlaRegistry {
         buyer: AccountId,
         price: U128,
         owner_key: PublicKey,
-    ) -> Result<(), ContractError> {
-        crate::assert_one_yocto()?;
-        self.assert_not_paused()?;
-        if price.0 == 0 {
-            return Err(ContractError::InvalidPrice);
-        }
+    ) -> Result<Promise, ContractError> {
+        let (sub_account, owner) = self.assert_listable(&tla_id, &name, price, &owner_key)?;
+        Ok(ext_active_signer::ext(self.active_signer.clone())
+            .with_static_gas(GAS_FOR_SIGNER_QUERY)
+            .signer_of(sub_account)
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_VERIFY_CALLBACK)
+                    .on_offer_verified(tla_id, name, buyer, price, owner_key, owner),
+            ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[private]
+    pub fn on_offer_verified(
+        &mut self,
+        tla_id: AccountId,
+        name: String,
+        buyer: AccountId,
+        price: U128,
+        owner_key: PublicKey,
+        seller: AccountId,
+        #[callback_result] current: Result<Option<String>, near_sdk::PromiseError>,
+    ) {
         let key = sub_account_key(&tla_id, &name);
-        self.assert_sale_idle(&key)?;
-        let owner = self.assert_sellable(&key, &tla_id)?;
-        if env::predecessor_account_id() != owner {
-            return Err(ContractError::OnlyOwner);
+        if !current_key_matches(&current, &owner_key) {
+            Event::OfferRejected {
+                full_name: key,
+                buyer,
+                seller,
+                reason: "owner_key_not_current".to_string(),
+            }
+            .emit();
+            return;
         }
         self.accepted_offers.insert(
             key.clone(),
@@ -127,10 +171,9 @@ impl TlaRegistry {
             full_name: key,
             buyer,
             price_yocto: price,
-            seller: owner,
+            seller,
         }
         .emit();
-        Ok(())
     }
 
     #[handle_result]
@@ -281,6 +324,33 @@ impl TlaRegistry {
 }
 
 impl TlaRegistry {
+    fn assert_listable(
+        &self,
+        tla_id: &AccountId,
+        name: &str,
+        price: U128,
+        owner_key: &PublicKey,
+    ) -> Result<(AccountId, AccountId), ContractError> {
+        crate::assert_one_yocto()?;
+        self.assert_not_paused()?;
+        if price.0 == 0 {
+            return Err(ContractError::InvalidPrice);
+        }
+        if !hos_common::is_ed25519(owner_key) {
+            return Err(ContractError::NotEd25519);
+        }
+        let key = sub_account_key(tla_id, name);
+        self.assert_sale_idle(&key)?;
+        let owner = self.assert_sellable(&key, tla_id)?;
+        if env::predecessor_account_id() != owner {
+            return Err(ContractError::OnlyOwner);
+        }
+        let sub_account: AccountId = key
+            .parse()
+            .map_err(|_| ContractError::InvalidSubAccountId)?;
+        Ok((sub_account, owner))
+    }
+
     pub(crate) fn assert_sale_idle(&self, key: &str) -> Result<(), ContractError> {
         if let Some(listing) = self.listings.get(key) {
             if listing.settling {
@@ -408,6 +478,18 @@ impl TlaRegistry {
         }
         .emit();
         PromiseOrValue::Value(())
+    }
+}
+
+fn current_key_matches(
+    current: &Result<Option<String>, near_sdk::PromiseError>,
+    owner_key: &PublicKey,
+) -> bool {
+    match (current, hos_common::ed25519_base58(owner_key)) {
+        (Ok(Some(signer)), Some(expected)) => {
+            signer.strip_prefix("ed25519:").unwrap_or(signer) == expected
+        }
+        _ => false,
     }
 }
 
