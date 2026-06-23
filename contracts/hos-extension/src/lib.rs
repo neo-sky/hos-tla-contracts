@@ -151,42 +151,6 @@ impl HosExtension {
     }
 
     #[handle_result]
-    pub fn set_registry(&mut self, registry: AccountId) -> Result<(), ContractError> {
-        self.assert_admin()?;
-        self.registry = registry.clone();
-        Event::RegistryUpdated {
-            registry,
-            by: env::predecessor_account_id(),
-        }
-        .emit();
-        Ok(())
-    }
-
-    #[handle_result]
-    pub fn set_active_signer(&mut self, active_signer: AccountId) -> Result<(), ContractError> {
-        self.assert_admin()?;
-        self.active_signer = active_signer.clone();
-        Event::ActiveSignerUpdated {
-            active_signer,
-            by: env::predecessor_account_id(),
-        }
-        .emit();
-        Ok(())
-    }
-
-    #[handle_result]
-    pub fn set_recovery(&mut self, recovery: AccountId) -> Result<(), ContractError> {
-        self.assert_admin()?;
-        self.recovery = recovery.clone();
-        Event::RecoveryUpdated {
-            recovery,
-            by: env::predecessor_account_id(),
-        }
-        .emit();
-        Ok(())
-    }
-
-    #[handle_result]
     pub fn migrate(&mut self) -> Result<(), ContractError> {
         self.assert_admin()?;
         if self.version >= CONTRACT_VERSION {

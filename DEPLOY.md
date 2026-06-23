@@ -4,12 +4,21 @@ How to deploy the House of Stake TLA contracts and hand control to the Security
 Council multisig. This describes mainnet; testnet is the same with testnet account
 names and `v1.signer-prod.testnet` in place of `v1.signer`.
 
-One thing to understand before you start: most of the wiring between contracts is
-fixed at init and has no setter. `active-signer` bakes in its marketplace and
-recovery authorities, `mpc-recovery` bakes in its owner, signer, and transfer
-authority, and `tla-manager` bakes in all of its references. Because every account
-name is chosen up front this is fine, but it means a wrong address cannot be patched
-later without redeploying. Get the names right first.
+One thing to understand before you start: the wiring between contracts is fixed at
+init and has no setter. `active-signer` bakes in its marketplace and recovery
+authorities, `hos-extension` bakes in its registry, active-signer, and recovery
+references, `mpc-recovery` bakes in its owner, signer, and transfer authority,
+`tla-manager` bakes in all of its references, and `tla-registry` bakes in its
+`hos-extension` and `active-signer`. Because every account name is chosen up front
+this is fine, but it means a wrong address cannot be patched later without
+redeploying. Get the names right first.
+
+The contract state schema is versioned at v1 and this suite is a fresh deploy: there
+is no prior on-chain state to migrate from. Each `migrate` method only performs a
+logic-only version bump and assumes the stored Borsh layout still deserializes, so a
+future release that changes a state struct must ship a dedicated
+`#[init(ignore_state)]` migration that reads the old layout and writes the new one.
+Do not alter a contract's state layout without one.
 
 ## 1. Account layout
 

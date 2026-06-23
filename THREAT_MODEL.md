@@ -142,11 +142,15 @@ that finds the sub-account already removed is a no-op rather than a double accou
 decrement. An admin escape hatch can clear a stuck lock if a settlement ever wedges.
 
 A sale is anchored to the owner key the seller listed against. `list_sub_account` and
-`accept_offer` record the seller's current owner key, and settlement passes it to
-`swap_owner` as a compare-and-swap. If the wallet's signing key has changed since the
-listing (for example a recovery rotated it), the swap voids, the sale does not
-complete, and the buyer is refunded. The settlement callback treats a voided swap as a
-failed sale, not a silent success.
+`accept_offer` verify that key against the wallet's live signer before the listing
+becomes buyable, and settlement passes it to `swap_owner` as a compare-and-swap. If the
+wallet's signing key changes after the listing is created (for example a recovery
+rotates it), the listing goes stale: settlement's compare-and-swap voids, the sale does
+not complete, and the buyer is refunded. The settlement callback treats a voided swap as
+a failed sale, not a silent success. The key is not re-verified at purchase time, so a
+buyer of a stale listing pays gas for the asset-gate and transfer receipts before the
+refund lands. This is gas grief, not fund loss; the settlement compare-and-swap remains
+the authoritative guard.
 
 The asset gate blocks any sale, reclaim, or re-rent that would move a sub-account
 unless every allow-listed fungible-token balance reads as provably zero. It is

@@ -256,18 +256,6 @@ fn outsider_cannot_pause() {
 }
 
 #[test]
-fn admin_can_rewire() {
-    let mut c = deploy();
-    ctx(ADMIN, 0);
-    c.set_registry(acc("registry2.testnet")).unwrap();
-    c.set_active_signer(acc("signer2.testnet")).unwrap();
-    c.set_recovery(acc("recovery2.testnet")).unwrap();
-    assert_eq!(c.get_registry(), acc("registry2.testnet"));
-    assert_eq!(c.get_active_signer(), acc("signer2.testnet"));
-    assert_eq!(c.get_recovery(), acc("recovery2.testnet"));
-}
-
-#[test]
 fn views_expose_config() {
     let c = deploy();
     assert_eq!(c.get_registry(), acc(REGISTRY));

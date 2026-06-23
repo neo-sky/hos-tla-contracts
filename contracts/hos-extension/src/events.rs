@@ -12,15 +12,6 @@ pub enum Event {
     #[event_version("1.0.0")]
     AdminRemoved { account: AccountId, by: AccountId },
     #[event_version("1.0.0")]
-    RegistryUpdated { registry: AccountId, by: AccountId },
-    #[event_version("1.0.0")]
-    ActiveSignerUpdated {
-        active_signer: AccountId,
-        by: AccountId,
-    },
-    #[event_version("1.0.0")]
-    RecoveryUpdated { recovery: AccountId, by: AccountId },
-    #[event_version("1.0.0")]
     ForceTransferRequested {
         wallet: AccountId,
         new_public_key: PublicKey,

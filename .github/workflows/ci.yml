@@ -5,14 +5,18 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
+  CARGO_NEAR_INSTALLER: https://github.com/near/cargo-near/releases/download/cargo-near-v0.21.1/cargo-near-installer.sh
 
 jobs:
   checks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Install Rust toolchain
         run: |
@@ -20,7 +24,7 @@ jobs:
           rustup component add rustfmt clippy
           rustup target add wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Format
         run: >
@@ -37,44 +41,39 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Install Rust toolchain
         run: |
           rustup show
           rustup target add wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install cargo-near
-        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+        run: curl --proto '=https' --tlsv1.2 -LsSf "$CARGO_NEAR_INSTALLER" | sh
 
-      - name: Build contracts
+      - name: Build deployable contracts
         run: |
           for crate in active-signer hos-extension mpc-recovery tla-manager tla-registry; do
             (cd "contracts/$crate" && cargo near build non-reproducible-wasm --no-abi)
           done
-
-      - name: Record wasm hashes
-        run: |
-          for wasm in target/near/*/*.wasm; do
-            sha256sum "$wasm"
-          done
+          (cd contracts/hos-wallet && cargo near build non-reproducible-wasm --locked --no-default-features --features=contract --no-abi)
 
   integration:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Install Rust toolchain
         run: |
           rustup show
           rustup target add wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install cargo-near
-        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
+        run: curl --proto '=https' --tlsv1.2 -LsSf "$CARGO_NEAR_INSTALLER" | sh
 
       - name: Build contracts
         run: |
@@ -89,7 +88,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Install Rust stable
         run: rustup toolchain install stable
       - name: Install cargo-audit
