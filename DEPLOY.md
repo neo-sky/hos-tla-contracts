@@ -155,6 +155,12 @@ A bootstrap or deployer key left in any admin set is a single-key backdoor next 
 multisig. If any set has more than `<council>` in it, stop and remove the extra before
 launch.
 
+The registry's contract wiring is immutable and has no setter, so a wrong address here
+can only be fixed by redeploying. Read it back and confirm it matches the layout:
+
+    near view <tla-registry> get_hos_extension  # expect <hos-extension>
+    near view <tla-registry> get_active_signer  # expect <active-signer>
+
 Every TLA account is locked. For each TLA account, list its keys and confirm none has
 FullAccess permission:
 

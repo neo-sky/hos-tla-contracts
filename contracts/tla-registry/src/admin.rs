@@ -153,18 +153,6 @@ impl TlaRegistry {
     }
 
     #[handle_result]
-    pub fn set_hos_extension(&mut self, hos_extension: AccountId) -> Result<(), ContractError> {
-        self.assert_admin()?;
-        self.hos_extension = hos_extension.clone();
-        Event::HosExtensionUpdated {
-            hos_extension,
-            by: env::predecessor_account_id(),
-        }
-        .emit();
-        Ok(())
-    }
-
-    #[handle_result]
     pub fn set_parked_signer_pubkey(&mut self, pubkey: PublicKey) -> Result<(), ContractError> {
         self.assert_admin()?;
         if !hos_common::is_ed25519(&pubkey) {

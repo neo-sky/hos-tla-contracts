@@ -54,6 +54,10 @@ impl TlaRegistry {
         self.hos_extension.clone()
     }
 
+    pub fn get_active_signer(&self) -> AccountId {
+        self.active_signer.clone()
+    }
+
     pub fn get_parked_signer_pubkey(&self) -> near_sdk::PublicKey {
         self.parked_signer_pubkey.clone()
     }

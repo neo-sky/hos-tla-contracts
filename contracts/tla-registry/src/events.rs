@@ -70,11 +70,6 @@ pub enum Event {
         by: AccountId,
     },
     #[event_version("1.0.0")]
-    HosExtensionUpdated {
-        hos_extension: AccountId,
-        by: AccountId,
-    },
-    #[event_version("1.0.0")]
     ParkedSignerUpdated { pubkey: PublicKey, by: AccountId },
     #[event_version("1.0.0")]
     BusinessSubCapSet {
