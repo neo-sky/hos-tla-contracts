@@ -90,7 +90,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust stable
+        run: rustup toolchain install stable
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: cargo +stable install cargo-audit --locked
       - name: RustSec advisory scan
-        run: cargo audit
+        # RUSTSEC-2026-0009 (time < 0.3.47, DoS via stack exhaustion) is a host-side
+        # near-o11y/tracing-appender transitive dependency. It is not present in the
+        # deployed wasm, and the fixed version requires Rust 1.88, which is incompatible
+        # with the 1.86 pin the nearcore VM mandates. Risk accepted and tracked here.
+        run: cargo +stable audit --ignore RUSTSEC-2026-0009
