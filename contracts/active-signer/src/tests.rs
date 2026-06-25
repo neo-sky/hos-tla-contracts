@@ -1,6 +1,8 @@
 use super::*;
+use defuse_wallet::signature::ed25519::Ed25519Signature;
 use defuse_wallet::signature::Deadline;
 use defuse_wallet::{Request, WalletOp};
+use defuse_wallet_sdk::ed25519::ed25519_dalek::ed25519::signature::Signer as DalekSigner;
 use defuse_wallet_sdk::ed25519::ed25519_dalek::SigningKey;
 use defuse_wallet_sdk::Signer;
 use near_sdk::test_utils::VMContextBuilder;
@@ -55,6 +57,33 @@ fn sign(k: &SigningKey, nonce: u32) -> (RequestMessage, String) {
     };
     let proof = Signer::sign(k, &msg).unwrap();
     (msg, proof)
+}
+
+fn sign_freeze_msg(k: &SigningKey, msg: FreezeMessage, domain: &[u8]) -> (FreezeMessage, String) {
+    ctx("client.testnet", 0, TS);
+    let serialized = near_sdk::borsh::to_vec(&msg).unwrap();
+    let hash = env::sha256_array([domain, &serialized].concat());
+    let signature = <SigningKey as DalekSigner<_>>::sign(k, &hash).to_bytes();
+    let proof = Ed25519Signature(signature).to_string();
+    (msg, proof)
+}
+
+fn freeze_msg(nonce: u32) -> FreezeMessage {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as u32;
+    FreezeMessage {
+        chain_id: CHAIN_ID.to_string(),
+        signer_id: acc(WALLET),
+        nonce,
+        created_at_secs: now_secs - 60,
+        timeout_secs: 3600,
+    }
+}
+
+fn sign_freeze(k: &SigningKey, nonce: u32) -> (FreezeMessage, String) {
+    sign_freeze_msg(k, freeze_msg(nonce), FREEZE_DOMAIN)
 }
 
 #[test]
@@ -400,4 +429,84 @@ fn admin_can_add_and_remove_admins() {
     ctx(OWNER, 0, TS);
     c.remove_admin(acc("hos2.testnet"));
     assert_eq!(c.admins().len(), 1);
+}
+
+#[test]
+#[should_panic(expected = "frozen")]
+fn self_freeze_halts_submit() {
+    let mut c = deploy();
+    let k = key(7);
+    install(&mut c, &k);
+    let (fmsg, fproof) = sign_freeze(&k, 1);
+    ctx("relayer.testnet", 0, TS);
+    c.self_freeze(acc(WALLET), fmsg, fproof);
+    assert_eq!(c.is_frozen(acc(WALLET)), Some(true));
+    let (msg, proof) = sign(&k, 2);
+    ctx("relayer.testnet", 1, TS);
+    let _ = c.submit_signed_request(acc(WALLET), msg, proof);
+}
+
+#[test]
+#[should_panic(expected = "invalid signature")]
+fn self_freeze_wrong_key_rejected() {
+    let mut c = deploy();
+    install(&mut c, &key(7));
+    let (fmsg, fproof) = sign_freeze(&key(9), 1);
+    ctx("relayer.testnet", 0, TS);
+    c.self_freeze(acc(WALLET), fmsg, fproof);
+}
+
+#[test]
+#[should_panic(expected = "invalid signature")]
+fn self_freeze_rejects_wallet_domain_sig() {
+    let mut c = deploy();
+    let k = key(7);
+    install(&mut c, &k);
+    let (fmsg, fproof) = sign_freeze_msg(&k, freeze_msg(1), b"NEAR_WALLET_CONTRACT/V1");
+    ctx("relayer.testnet", 0, TS);
+    c.self_freeze(acc(WALLET), fmsg, fproof);
+}
+
+#[test]
+#[should_panic(expected = "nonce already used")]
+fn self_freeze_replay_rejected() {
+    let mut c = deploy();
+    let k = key(7);
+    install(&mut c, &k);
+    let (fmsg, fproof) = sign_freeze(&k, 1);
+    ctx("relayer.testnet", 0, TS);
+    c.self_freeze(acc(WALLET), fmsg.clone(), fproof.clone());
+    ctx("relayer.testnet", 0, TS);
+    c.self_freeze(acc(WALLET), fmsg, fproof);
+}
+
+#[test]
+fn recovery_swaps_after_self_freeze() {
+    let mut c = deploy();
+    let k = key(7);
+    install(&mut c, &k);
+    let (fmsg, fproof) = sign_freeze(&k, 1);
+    ctx("relayer.testnet", 0, TS);
+    c.self_freeze(acc(WALLET), fmsg, fproof);
+    assert_eq!(c.is_frozen(acc(WALLET)), Some(true));
+    ctx(RECOVERY, 0, TS);
+    c.swap_owner(acc(WALLET), Signer::public_key(&key(8)).to_string(), None);
+    assert_eq!(c.is_frozen(acc(WALLET)), Some(false));
+    assert_eq!(
+        c.signer_of(acc(WALLET)),
+        Some(Signer::public_key(&key(8)).to_string())
+    );
+}
+
+#[test]
+#[should_panic(expected = "only recovery")]
+fn owner_cannot_unfreeze_self_freeze() {
+    let mut c = deploy();
+    let k = key(7);
+    install(&mut c, &k);
+    let (fmsg, fproof) = sign_freeze(&k, 1);
+    ctx("relayer.testnet", 0, TS);
+    c.self_freeze(acc(WALLET), fmsg, fproof);
+    ctx("client.testnet", 0, TS);
+    c.unfreeze(acc(WALLET));
 }

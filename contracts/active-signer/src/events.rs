@@ -15,6 +15,8 @@ pub enum Event {
     #[event_version("1.0.0")]
     Unfrozen { wallet: AccountId },
     #[event_version("1.0.0")]
+    SelfFrozen { wallet: AccountId },
+    #[event_version("1.0.0")]
     MinterAdded { minter: AccountId },
     #[event_version("1.0.0")]
     MinterRemoved { minter: AccountId },

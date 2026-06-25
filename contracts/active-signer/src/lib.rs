@@ -2,12 +2,15 @@ mod error;
 mod events;
 mod state;
 
+use core::marker::PhantomData;
 use std::str::FromStr;
 use std::time::Duration;
 
 use defuse_wallet::ext_wallet;
 use defuse_wallet::signature::ed25519::{Ed25519, Ed25519PublicKey};
-use defuse_wallet::signature::{Borsh, DomainPrefix, RequestMessage, Sha256, SigningStandard};
+use defuse_wallet::signature::{
+    Borsh, Deadline, DomainPrefix, RequestMessage, Sha256, SigningStandard,
+};
 use defuse_wallet::Nonces;
 use near_sdk::borsh::BorshSerialize;
 use near_sdk::store::{IterableSet, LookupMap};
@@ -17,11 +20,43 @@ use crate::events::Event;
 use crate::state::SignerEntry;
 
 type Pipeline = Borsh<DomainPrefix<Sha256<Ed25519>>>;
+type FreezePipeline = Borsh<FreezeDomainPrefix<Sha256<Ed25519>>>;
 
 const CHAIN_ID: &str = "mainnet";
 const WALLET_GAS: Gas = Gas::from_tgas(50);
 const BY_MARKETPLACE: &str = "marketplace";
 const BY_RECOVERY: &str = "recovery";
+const FREEZE_DOMAIN: &[u8] = b"NEAR_HOS_ACTIVE_SIGNER_FREEZE/V1";
+
+struct FreezeDomainPrefix<S>(PhantomData<S>)
+where
+    S: SigningStandard<Vec<u8>> + ?Sized;
+
+impl<M, S> SigningStandard<M> for FreezeDomainPrefix<S>
+where
+    S: SigningStandard<Vec<u8>> + ?Sized,
+    M: AsRef<[u8]>,
+{
+    type PublicKey = S::PublicKey;
+
+    fn verify(msg: M, public_key: &Self::PublicKey, signature: &str) -> bool {
+        S::verify(
+            [FREEZE_DOMAIN, msg.as_ref()].concat(),
+            public_key,
+            signature,
+        )
+    }
+}
+
+#[near(serializers = [borsh, json])]
+#[derive(Clone)]
+pub struct FreezeMessage {
+    pub chain_id: String,
+    pub signer_id: AccountId,
+    pub nonce: u32,
+    pub created_at_secs: u32,
+    pub timeout_secs: u32,
+}
 
 #[derive(BorshSerialize, BorshStorageKey)]
 #[borsh(crate = "near_sdk::borsh")]
@@ -194,6 +229,27 @@ impl ActiveSigner {
         }
         .emit();
         true
+    }
+
+    pub fn self_freeze(&mut self, wallet: AccountId, msg: FreezeMessage, proof: String) {
+        require!(msg.chain_id == CHAIN_ID, error::WRONG_CHAIN);
+        require!(msg.signer_id == wallet, error::SIGNER_MISMATCH);
+        let entry = self
+            .signers
+            .get_mut(&wallet)
+            .unwrap_or_else(|| env::panic_str(error::NO_SIGNER));
+        require!(
+            FreezePipeline::verify(&msg, &entry.public_key, &proof),
+            error::BAD_SIGNATURE
+        );
+        let created_at = Deadline::UNIX_EPOCH + Duration::from_secs(msg.created_at_secs.into());
+        let timeout = Duration::from_secs(msg.timeout_secs.into());
+        entry
+            .nonces
+            .commit(msg.nonce, created_at, timeout)
+            .unwrap_or_else(|_| env::panic_str(error::NONCE_REJECTED));
+        entry.frozen = true;
+        Event::SelfFrozen { wallet }.emit();
     }
 
     pub fn freeze(&mut self, wallet: AccountId, expected_current: Option<String>) {
