@@ -94,8 +94,14 @@ jobs:
       - name: Install cargo-audit
         run: cargo +stable install cargo-audit --locked
       - name: RustSec advisory scan
-        # RUSTSEC-2026-0009 (time < 0.3.47, DoS via stack exhaustion) is a host-side
-        # near-o11y/tracing-appender transitive dependency. It is not present in the
-        # deployed wasm, and the fixed version requires Rust 1.88, which is incompatible
-        # with the 1.86 pin the nearcore VM mandates. Risk accepted and tracked here.
-        run: cargo +stable audit --ignore RUSTSEC-2026-0009
+        # Three advisories appear in the dependency tree and are triaged here; none is
+        # reachable in the deployed contract wasm.
+        #   RUSTSEC-2026-0009 (time < 0.3.47, DoS via stack exhaustion): a host-side
+        #     near-o11y/tracing-appender transitive, absent from the wasm. Its fix needs
+        #     Rust 1.88, incompatible with the 1.86 pin the nearcore VM mandates.
+        #   RUSTSEC-2026-0173 (proc-macro-error2 unmaintained): a build-time proc-macro
+        #     helper pulled by impl-tools, compiled away before runtime.
+        #   RUSTSEC-2022-0054 (wee_alloc unmaintained): not the contract allocator
+        #     (near-sdk 5.x uses the default system allocator); not linked into the wasm.
+        # Risk accepted and tracked here.
+        run: cargo +stable audit --ignore RUSTSEC-2026-0009 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2022-0054
