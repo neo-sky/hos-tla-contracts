@@ -156,7 +156,9 @@ impl HosExtension {
         let reserve = env::storage_byte_cost()
             .as_yoctonear()
             .saturating_mul(env::storage_usage() as u128);
-        let available = env::account_balance().as_yoctonear().saturating_sub(reserve);
+        let available = env::account_balance()
+            .as_yoctonear()
+            .saturating_sub(reserve);
         if amount.0 > available {
             return Err(ContractError::InsufficientBalance);
         }

@@ -71,7 +71,13 @@ impl TlaRegistry {
             .emit();
             return;
         }
-        if self.sub_accounts.get(&key).map(|s| s.owner.clone()).as_ref() != Some(&seller) {
+        if self
+            .sub_accounts
+            .get(&key)
+            .map(|s| s.owner.clone())
+            .as_ref()
+            != Some(&seller)
+        {
             Event::ListingRejected {
                 full_name: key,
                 seller,
@@ -177,7 +183,13 @@ impl TlaRegistry {
             .emit();
             return;
         }
-        if self.sub_accounts.get(&key).map(|s| s.owner.clone()).as_ref() != Some(&seller) {
+        if self
+            .sub_accounts
+            .get(&key)
+            .map(|s| s.owner.clone())
+            .as_ref()
+            != Some(&seller)
+        {
             Event::OfferRejected {
                 full_name: key,
                 buyer,
@@ -187,7 +199,12 @@ impl TlaRegistry {
             .emit();
             return;
         }
-        if self.accepted_offers.get(&key).map(|o| o.settling).unwrap_or(false) {
+        if self
+            .accepted_offers
+            .get(&key)
+            .map(|o| o.settling)
+            .unwrap_or(false)
+        {
             Event::OfferRejected {
                 full_name: key,
                 buyer,
