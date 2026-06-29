@@ -16,3 +16,4 @@ pub const UNAUTHORIZED: &str = "unauthorized";
 pub const BAD_KEY: &str = "invalid ed25519 public key";
 pub const SIGNER_EXISTS: &str = "signer already installed";
 pub const OPS_NOT_ALLOWED: &str = "wallet ops are not allowed through the owner signing path";
+pub const INVALID_TIMEOUT: &str = "timeout_secs out of bounds";

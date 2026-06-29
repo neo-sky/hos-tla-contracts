@@ -17,12 +17,14 @@ use near_sdk::store::{IterableSet, LookupMap};
 use near_sdk::{env, near, require, AccountId, BorshStorageKey, Gas, PanicOnDefault, Promise};
 
 use crate::events::Event;
-use crate::state::SignerEntry;
+use crate::state::{FreezeState, SignerEntry};
 
 type Pipeline = Borsh<DomainPrefix<Sha256<Ed25519>>>;
 type FreezePipeline = Borsh<FreezeDomainPrefix<Sha256<Ed25519>>>;
 
 const CHAIN_ID: &str = "mainnet";
+const MIN_TIMEOUT_SECS: u32 = 60;
+const MAX_TIMEOUT_SECS: u32 = 2_592_000;
 const WALLET_GAS: Gas = Gas::from_tgas(50);
 const BY_MARKETPLACE: &str = "marketplace";
 const BY_RECOVERY: &str = "recovery";
@@ -86,6 +88,10 @@ impl ActiveSigner {
         recovery_authority: AccountId,
         timeout_secs: u32,
     ) -> Self {
+        require!(
+            (MIN_TIMEOUT_SECS..=MAX_TIMEOUT_SECS).contains(&timeout_secs),
+            error::INVALID_TIMEOUT
+        );
         let mut admins = IterableSet::new(StorageKey::Admins);
         admins.insert(admin);
         Self {
@@ -141,8 +147,9 @@ impl ActiveSigner {
             SignerEntry {
                 public_key,
                 nonces: Nonces::new(timeout),
+                freeze_nonces: Nonces::new(timeout),
                 last_signed_at: 0,
-                frozen: false,
+                frozen: FreezeState::Unfrozen,
             },
         );
         Event::SignerInstalled { wallet }.emit();
@@ -164,7 +171,7 @@ impl ActiveSigner {
             .signers
             .get_mut(&wallet)
             .unwrap_or_else(|| env::panic_str(error::NO_SIGNER));
-        require!(!entry.frozen, error::FROZEN);
+        require!(entry.frozen == FreezeState::Unfrozen, error::FROZEN);
         require!(
             Pipeline::verify(&msg, &entry.public_key, &proof),
             error::BAD_SIGNATURE
@@ -202,10 +209,9 @@ impl ActiveSigner {
             .get_mut(&wallet)
             .unwrap_or_else(|| env::panic_str(error::NO_SIGNER));
         if marketplace {
-            require!(!entry.frozen, error::FROZEN);
+            require!(entry.frozen == FreezeState::Unfrozen, error::FROZEN);
         } else {
-            require!(entry.frozen, error::NOT_FROZEN);
-            entry.frozen = false;
+            require!(entry.frozen != FreezeState::Unfrozen, error::NOT_FROZEN);
         }
         if let Some(expected) = expected_current {
             if entry.public_key != parse_key(&expected) {
@@ -216,8 +222,10 @@ impl ActiveSigner {
                 return false;
             }
         }
+        entry.frozen = FreezeState::Unfrozen;
         entry.public_key = new_public_key;
         entry.nonces = Nonces::new(timeout);
+        entry.freeze_nonces = Nonces::new(timeout);
         let by = if marketplace {
             BY_MARKETPLACE
         } else {
@@ -245,10 +253,10 @@ impl ActiveSigner {
         let created_at = Deadline::UNIX_EPOCH + Duration::from_secs(msg.created_at_secs.into());
         let timeout = Duration::from_secs(msg.timeout_secs.into());
         entry
-            .nonces
+            .freeze_nonces
             .commit(msg.nonce, created_at, timeout)
             .unwrap_or_else(|_| env::panic_str(error::NONCE_REJECTED));
-        entry.frozen = true;
+        entry.frozen = FreezeState::SelfFrozen;
         Event::SelfFrozen { wallet }.emit();
     }
 
@@ -267,7 +275,9 @@ impl ActiveSigner {
                 error::OWNER_CHANGED
             );
         }
-        entry.frozen = true;
+        if entry.frozen != FreezeState::SelfFrozen {
+            entry.frozen = FreezeState::RecoveryFrozen;
+        }
         Event::Frozen { wallet }.emit();
     }
 
@@ -276,10 +286,14 @@ impl ActiveSigner {
             env::predecessor_account_id() == self.recovery_authority,
             error::ONLY_RECOVERY
         );
-        self.signers
+        let entry = self
+            .signers
             .get_mut(&wallet)
-            .unwrap_or_else(|| env::panic_str(error::NO_SIGNER))
-            .frozen = false;
+            .unwrap_or_else(|| env::panic_str(error::NO_SIGNER));
+        if entry.frozen == FreezeState::SelfFrozen {
+            return;
+        }
+        entry.frozen = FreezeState::Unfrozen;
         Event::Unfrozen { wallet }.emit();
     }
 
@@ -292,7 +306,9 @@ impl ActiveSigner {
     }
 
     pub fn is_frozen(&self, wallet: AccountId) -> Option<bool> {
-        self.signers.get(&wallet).map(|e| e.frozen)
+        self.signers
+            .get(&wallet)
+            .map(|e| e.frozen != FreezeState::Unfrozen)
     }
 
     pub fn is_minter(&self, account: AccountId) -> bool {

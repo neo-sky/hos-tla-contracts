@@ -222,7 +222,7 @@ fn recovery_swap_with_matching_cas_succeeds() {
 }
 
 #[test]
-fn recovery_swap_with_stale_cas_voids_and_releases() {
+fn recovery_swap_with_stale_cas_voids_and_stays_frozen() {
     let mut c = deploy();
     install(&mut c, &key(7));
     ctx(RECOVERY, 0, TS);
@@ -238,7 +238,41 @@ fn recovery_swap_with_stale_cas_voids_and_releases() {
         c.signer_of(acc(WALLET)),
         Some(Signer::public_key(&key(7)).to_string())
     );
-    assert_eq!(c.is_frozen(acc(WALLET)), Some(false));
+    assert_eq!(c.is_frozen(acc(WALLET)), Some(true));
+}
+
+#[test]
+#[should_panic(expected = "timeout_secs out of bounds")]
+fn new_rejects_zero_timeout() {
+    ctx(OWNER, 0, 0);
+    let _ = ActiveSigner::new(acc(OWNER), acc(MARKET), acc(RECOVERY), 0);
+}
+
+#[test]
+fn recovery_unfreeze_is_noop_on_self_freeze() {
+    let mut c = deploy();
+    let k = key(7);
+    install(&mut c, &k);
+    let (fmsg, fproof) = sign_freeze(&k, 1);
+    ctx("relayer.testnet", 0, TS);
+    c.self_freeze(acc(WALLET), fmsg, fproof);
+    ctx(RECOVERY, 0, TS);
+    c.unfreeze(acc(WALLET));
+    assert_eq!(c.is_frozen(acc(WALLET)), Some(true));
+}
+
+#[test]
+fn submit_and_self_freeze_use_independent_nonces() {
+    let mut c = deploy();
+    let k = key(7);
+    install(&mut c, &k);
+    let (msg, proof) = sign(&k, 1);
+    ctx("relayer.testnet", 1, TS);
+    let _ = c.submit_signed_request(acc(WALLET), msg, proof);
+    let (fmsg, fproof) = sign_freeze(&k, 1);
+    ctx("relayer.testnet", 0, TS);
+    c.self_freeze(acc(WALLET), fmsg, fproof);
+    assert_eq!(c.is_frozen(acc(WALLET)), Some(true));
 }
 
 #[test]
