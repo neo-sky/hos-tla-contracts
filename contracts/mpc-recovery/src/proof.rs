@@ -41,7 +41,15 @@ pub fn verdict_message(
 
 pub fn verify(message: &[u8], signature: &[u8; 64], key: &PublicKey) -> bool {
     match ed25519_key(key) {
-        Some(pubkey) => env::ed25519_verify(signature, message, &pubkey),
+        Some(pubkey) => {
+            if ed25519_dalek::VerifyingKey::from_bytes(&pubkey)
+                .map(|vk| vk.is_weak())
+                .unwrap_or(true)
+            {
+                return false;
+            }
+            env::ed25519_verify(signature, message, &pubkey)
+        }
         None => false,
     }
 }
@@ -110,6 +118,15 @@ mod tests {
         let sig = sign(&sk, msg);
         assert!(verify(msg, &sig, &pk));
         assert!(!verify(b"other", &sig, &pk));
+    }
+
+    #[test]
+    fn verify_rejects_weak_low_order_key() {
+        ctx();
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        let weak = PublicKey::from_parts(CurveType::ED25519, identity.to_vec()).unwrap();
+        assert!(!verify(b"anything", &[0u8; 64], &weak));
     }
 
     #[test]
