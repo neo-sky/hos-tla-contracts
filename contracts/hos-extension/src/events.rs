@@ -18,6 +18,16 @@ pub enum Event {
         by: AccountId,
     },
     #[event_version("1.0.0")]
+    ForceTransferCompleted { wallet: AccountId },
+    #[event_version("1.0.0")]
+    ForceTransferVoided { wallet: AccountId },
+    #[event_version("1.0.0")]
+    BalanceSkimmed {
+        amount: U128,
+        to: AccountId,
+        by: AccountId,
+    },
+    #[event_version("1.0.0")]
     SweepRequested {
         wallet: AccountId,
         ft: AccountId,

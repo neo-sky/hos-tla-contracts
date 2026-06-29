@@ -151,13 +151,22 @@ impl HosExtension {
     }
 
     #[handle_result]
-    pub fn migrate(&mut self) -> Result<(), ContractError> {
+    pub fn skim(&mut self, amount: U128, to: AccountId) -> Result<Promise, ContractError> {
         self.assert_admin()?;
-        if self.version >= CONTRACT_VERSION {
-            return Err(ContractError::AlreadyAtCurrentVersion);
+        let reserve = env::storage_byte_cost()
+            .as_yoctonear()
+            .saturating_mul(env::storage_usage() as u128);
+        let available = env::account_balance().as_yoctonear().saturating_sub(reserve);
+        if amount.0 > available {
+            return Err(ContractError::InsufficientBalance);
         }
-        self.version = CONTRACT_VERSION;
-        Ok(())
+        Event::BalanceSkimmed {
+            amount,
+            to: to.clone(),
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(Promise::new(to).transfer(NearToken::from_yoctonear(amount.0)))
     }
 
     #[handle_result]
@@ -223,9 +232,15 @@ impl HosExtension {
     ) -> bool {
         let transferred = matches!(swapped, Ok(true));
         if transferred {
+            Event::ForceTransferCompleted {
+                wallet: wallet.clone(),
+            }
+            .emit();
             let _ = ext_mpc_recovery::ext(self.recovery.clone())
                 .with_static_gas(GAS_FOR_RESET)
                 .on_wallet_transferred(wallet);
+        } else {
+            Event::ForceTransferVoided { wallet }.emit();
         }
         transferred
     }
@@ -240,7 +255,7 @@ impl HosExtension {
     ) -> Result<Promise, ContractError> {
         self.assert_registry()?;
         self.assert_not_paused()?;
-        if env::attached_deposit() < MIN_SWEEP_ATTACHED {
+        if env::attached_deposit() != MIN_SWEEP_ATTACHED {
             return Err(ContractError::InsufficientDeposit);
         }
         Event::SweepRequested {

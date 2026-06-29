@@ -45,6 +45,33 @@ fn registry_force_transfer_returns_promise() {
 }
 
 #[test]
+fn admin_can_skim_within_available_balance() {
+    let mut c = deploy();
+    ctx(ADMIN, 0);
+    let _ = c.skim(U128(1), acc(DEST)).unwrap();
+}
+
+#[test]
+fn non_admin_cannot_skim() {
+    let mut c = deploy();
+    ctx(REGISTRY, 0);
+    assert!(matches!(
+        c.skim(U128(1), acc(DEST)),
+        Err(ContractError::OnlyAdmin)
+    ));
+}
+
+#[test]
+fn skim_rejects_above_available_balance() {
+    let mut c = deploy();
+    ctx(ADMIN, 0);
+    assert!(matches!(
+        c.skim(U128(u128::MAX), acc(DEST)),
+        Err(ContractError::InsufficientBalance)
+    ));
+}
+
+#[test]
 fn force_transfer_emits_nep297_event() {
     let mut c = deploy();
     ctx(REGISTRY, 0);

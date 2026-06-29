@@ -8,8 +8,8 @@ pub enum ContractError {
     OnlyRegistry,
     Paused,
     CannotRemoveLastAdmin,
-    AlreadyAtCurrentVersion,
     InsufficientDeposit,
+    InsufficientBalance,
     NotEd25519,
 }
 
