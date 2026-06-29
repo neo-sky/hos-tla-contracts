@@ -34,6 +34,8 @@ pub enum Event {
         destination: AccountId,
         by: AccountId,
     },
+    // Signals the ft_transfer was dispatched (scheduled via the wallet's detached
+    // out-promise), not that it has settled. The registry re-reads balances before parking.
     #[event_version("1.0.0")]
     SweepDispatched {
         wallet: AccountId,

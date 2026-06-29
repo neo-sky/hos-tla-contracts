@@ -353,6 +353,8 @@ impl HosExtension {
         destination: AccountId,
         amount: U128,
     ) {
+        // success here means the wallet accepted and scheduled the ft_transfer, which it
+        // emits as a detached out-promise; this confirms dispatch, not final settlement.
         if near_sdk::is_promise_success() {
             Event::SweepDispatched {
                 wallet,
