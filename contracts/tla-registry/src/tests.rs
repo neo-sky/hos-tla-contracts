@@ -601,6 +601,56 @@ mod marketplace {
     }
 
     #[test]
+    fn reaccept_verify_does_not_clear_settling_lock() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        accept_alice(&mut c, acc(BOB), 10);
+        ctx(BOB, 10, 2);
+        let _ = c
+            .buy_sub_account(acc(TLA), "alice".to_string(), parked_key())
+            .unwrap();
+        ctx(ALICE, 0, 2);
+        c.on_offer_verified(
+            acc(TLA),
+            "alice".to_string(),
+            acc(BOB),
+            U128(10),
+            parked_key(),
+            acc(ALICE),
+            signer_match(&parked_key()),
+        );
+        assert!(
+            c.get_accepted_offer(acc(TLA), "alice".to_string())
+                .unwrap()
+                .settling
+        );
+    }
+
+    #[test]
+    fn relist_verify_after_owner_change_rejected() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(ALICE, 1, 2);
+        let _ = c
+            .list_sub_account(acc(TLA), "alice".to_string(), U128(10), parked_key())
+            .unwrap();
+        let key = format!("alice.{TLA}");
+        if let Some(sub) = c.sub_accounts.get_mut(&key) {
+            sub.owner = acc(BOB);
+        }
+        ctx(ALICE, 0, 2);
+        c.on_listing_verified(
+            acc(TLA),
+            "alice".to_string(),
+            U128(10),
+            parked_key(),
+            acc(ALICE),
+            signer_match(&parked_key()),
+        );
+        assert!(c.get_listing(acc(TLA), "alice".to_string()).is_none());
+    }
+
+    #[test]
     fn buy_locks_sale_against_relist() {
         let mut c = deploy_with_open_tla();
         rent_alice_sub(&mut c, "alice");
@@ -946,6 +996,26 @@ mod reclaim {
         ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
         c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE));
         assert!(c.is_name_re_rentable(acc(TLA), "alice".to_string()));
+    }
+
+    #[test]
+    fn admin_can_clear_reclaim_pending() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let expires = c
+            .get_sub_account(acc(TLA), "alice".to_string())
+            .unwrap()
+            .expires_at
+            .0 as u64;
+        ctx(BOB, 0, expires + GRACE_NS + DAY_NS);
+        let _ = c
+            .reclaim_finalize(acc(TLA), "alice".to_string())
+            .expect("reclaim takes the in-progress lock");
+        assert!(c.is_reclaim_in_progress(acc(TLA), "alice".to_string()));
+        ctx(ADMIN, 0, 2);
+        c.admin_clear_reclaim_pending(acc(TLA), "alice".to_string())
+            .unwrap();
+        assert!(!c.is_reclaim_in_progress(acc(TLA), "alice".to_string()));
     }
 
     #[test]

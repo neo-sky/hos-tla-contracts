@@ -196,4 +196,6 @@ pub enum Event {
     SignerInstalled { full_name: String },
     #[event_version("1.0.0")]
     SettlingCleared { full_name: String, by: AccountId },
+    #[event_version("1.0.0")]
+    ReclaimPendingCleared { full_name: String, by: AccountId },
 }

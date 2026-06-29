@@ -22,12 +22,14 @@ The active signer also lets a wallet owner freeze their own sub-account through
 an owner signature over a freeze message under a domain
 (`NEAR_HOS_ACTIVE_SIGNER_FREEZE/V1`) separate from the wallet signing domain, so a
 normal signed request can never trigger a freeze and a freeze signature can never be
-replayed as a request; it is replay-bound by the same per-wallet nonce window as
-signing. A freeze only blocks signing: it moves no funds and changes no ownership.
-Unfreezing is recovery-only, since `unfreeze` is gated to the recovery authority and
-a recovery swap clears the flag, so the halt is one-way: an attacker who has stolen
-the operating key can re-freeze but cannot unfreeze, so the legitimate owner halts the
-thief and then recovers. One interaction to note: a marketplace settlement swap
+replayed as a request; it is replay-bound by its own per-wallet freeze nonce window, a
+bitmap separate from the signing nonces. A freeze only blocks signing: it moves no
+funds and changes no ownership. The freeze records its source, so clearing it is
+recovery-only and asymmetric: `unfreeze` (recovery-authority only) clears a recovery
+freeze but leaves an owner self-freeze in place, and only a recovery `swap_owner` that
+rotates the key clears a self-freeze. The halt is therefore one-way for a thief: an
+attacker who has stolen the operating key can re-freeze but can neither unfreeze nor
+rotate the key, so the legitimate owner halts the thief and then recovers. One interaction to note: a marketplace settlement swap
 requires the wallet to be unfrozen, so an owner who self-freezes a listed sub-account
 aborts a pending sale of it. The settlement fails closed and the buyer is refunded, so
 this is the owner's prerogative and a gas grief on the buyer, never a fund loss or a

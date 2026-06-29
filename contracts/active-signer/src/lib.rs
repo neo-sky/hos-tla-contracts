@@ -291,6 +291,7 @@ impl ActiveSigner {
             .get_mut(&wallet)
             .unwrap_or_else(|| env::panic_str(error::NO_SIGNER));
         if entry.frozen == FreezeState::SelfFrozen {
+            Event::UnfreezeRefused { wallet }.emit();
             return;
         }
         entry.frozen = FreezeState::Unfrozen;
@@ -309,6 +310,10 @@ impl ActiveSigner {
         self.signers
             .get(&wallet)
             .map(|e| e.frozen != FreezeState::Unfrozen)
+    }
+
+    pub fn freeze_state(&self, wallet: AccountId) -> Option<FreezeState> {
+        self.signers.get(&wallet).map(|e| e.frozen)
     }
 
     pub fn is_minter(&self, account: AccountId) -> bool {

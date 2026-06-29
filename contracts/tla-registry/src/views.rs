@@ -47,6 +47,11 @@ impl TlaRegistry {
         self.parked_names.contains_key(&key)
     }
 
+    pub fn is_reclaim_in_progress(&self, tla_id: AccountId, name: String) -> bool {
+        let key = sub_account_key(&tla_id, &name);
+        self.reclaim_pending.contains_key(&key)
+    }
+
     pub fn get_hos_extension(&self) -> AccountId {
         self.hos_extension.clone()
     }

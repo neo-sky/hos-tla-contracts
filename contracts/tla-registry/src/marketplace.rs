@@ -114,6 +114,7 @@ impl TlaRegistry {
     ) -> Result<(), ContractError> {
         crate::assert_one_yocto()?;
         self.assert_not_paused()?;
+        validate_name(&name)?;
         let key = sub_account_key(&tla_id, &name);
         self.assert_sale_idle(&key)?;
         if !self.listings.contains_key(&key) {
@@ -219,6 +220,7 @@ impl TlaRegistry {
     pub fn revoke_offer(&mut self, tla_id: AccountId, name: String) -> Result<(), ContractError> {
         crate::assert_one_yocto()?;
         self.assert_not_paused()?;
+        validate_name(&name)?;
         let key = sub_account_key(&tla_id, &name);
         self.assert_sale_idle(&key)?;
         if !self.accepted_offers.contains_key(&key) {

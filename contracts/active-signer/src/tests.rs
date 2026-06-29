@@ -259,6 +259,7 @@ fn recovery_unfreeze_is_noop_on_self_freeze() {
     ctx(RECOVERY, 0, TS);
     c.unfreeze(acc(WALLET));
     assert_eq!(c.is_frozen(acc(WALLET)), Some(true));
+    assert_eq!(c.freeze_state(acc(WALLET)), Some(FreezeState::SelfFrozen));
 }
 
 #[test]
