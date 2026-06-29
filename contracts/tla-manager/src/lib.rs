@@ -169,6 +169,10 @@ impl TlaManager {
         &self.registry
     }
 
+    pub fn min_balance(&self) -> NearToken {
+        self.min_balance
+    }
+
     pub fn config(&self) -> (AccountId, AccountId, Base58CryptoHash, NearToken) {
         (
             self.active_signer.clone(),
