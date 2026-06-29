@@ -47,6 +47,7 @@ enum StorageKey {
     AcceptedOffers,
     ParkedNames,
     SignerPending,
+    ReclaimPending,
 }
 
 #[near(contract_state)]
@@ -71,6 +72,7 @@ pub struct TlaRegistry {
     pub(crate) accepted_offers: LookupMap<String, AcceptedOffer>,
     pub(crate) parked_names: LookupMap<String, ParkedEntry>,
     pub(crate) signer_pending: LookupMap<String, PublicKey>,
+    pub(crate) reclaim_pending: LookupMap<String, bool>,
     pub(crate) hos_extension: AccountId,
     pub(crate) active_signer: AccountId,
     pub(crate) parked_signer_pubkey: PublicKey,
@@ -118,6 +120,7 @@ impl TlaRegistry {
             accepted_offers: LookupMap::new(StorageKey::AcceptedOffers),
             parked_names: LookupMap::new(StorageKey::ParkedNames),
             signer_pending: LookupMap::new(StorageKey::SignerPending),
+            reclaim_pending: LookupMap::new(StorageKey::ReclaimPending),
             hos_extension,
             active_signer,
             parked_signer_pubkey,

@@ -861,6 +861,45 @@ mod reclaim {
         ctx(ADMIN, 0, 0);
         let _ = TlaRegistry::new(acc(ADMIN), acc(HOSEXT), acc(SIGNER), parked_key(), U64(0));
     }
+
+    #[test]
+    fn concurrent_reclaim_blocked_until_finalized() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let expires = c
+            .get_sub_account(acc(TLA), "alice".to_string())
+            .unwrap()
+            .expires_at
+            .0 as u64;
+        ctx(BOB, 0, expires + GRACE_NS + DAY_NS);
+        let _ = c
+            .reclaim_finalize(acc(TLA), "alice".to_string())
+            .expect("first reclaim dispatches and takes the in-progress lock");
+        assert!(matches!(
+            c.reclaim_finalize(acc(TLA), "alice".to_string()),
+            Err(ContractError::ReclaimInProgress)
+        ));
+        ctx_callback(near_sdk::PromiseResult::Successful(vec![]));
+        c.on_reclaim_finalized(acc(TLA), "alice".to_string(), acc(ALICE));
+        assert!(c.is_name_re_rentable(acc(TLA), "alice".to_string()));
+    }
+
+    #[test]
+    fn stale_reclaim_callback_aborts_when_no_longer_reclaimable() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        let key = format!("alice.{TLA}");
+        c.reclaim_pending.insert(key.clone(), true);
+        testing_env!(VMContextBuilder::new()
+            .current_account_id(acc("registry.testnet"))
+            .predecessor_account_id(acc("registry.testnet"))
+            .block_timestamp(2)
+            .build());
+        let out = c.on_balances_checked(acc(TLA), "alice".to_string(), acc(ALICE), vec![]);
+        assert!(matches!(out, near_sdk::PromiseOrValue::Value(())));
+        assert!(!c.reclaim_pending.contains_key(&key));
+        assert!(c.get_sub_account(acc(TLA), "alice".to_string()).is_some());
+    }
 }
 
 mod refunds_and_admin {

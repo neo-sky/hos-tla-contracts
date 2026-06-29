@@ -49,6 +49,7 @@ pub enum ContractError {
     InsufficientContractBalance,
     NotListed,
     SaleInProgress,
+    ReclaimInProgress,
     SubAccountNotSellable,
     BusinessSubNotResellable,
     PriceNotMet,

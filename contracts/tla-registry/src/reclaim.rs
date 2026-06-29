@@ -52,7 +52,11 @@ impl TlaRegistry {
         self.assert_not_paused()?;
         let key = sub_account_key(&tla_id, &name);
         self.assert_sale_idle(&key)?;
+        if self.reclaim_pending.contains_key(&key) {
+            return Err(ContractError::ReclaimInProgress);
+        }
         let (sub_account, destination) = self.resolve_reclaimable(&tla_id, &key)?;
+        self.reclaim_pending.insert(key.clone(), true);
 
         let allowlist: Vec<AccountId> = self.ft_allowlist.iter().cloned().collect();
         let Some(chain) = ft_balance_fanout(&allowlist, &sub_account) else {
@@ -75,6 +79,7 @@ impl TlaRegistry {
     ) -> PromiseOrValue<()> {
         let key = sub_account_key(&tla_id, &name);
         if self.assert_sale_idle(&key).is_err() {
+            self.reclaim_pending.remove(&key);
             Event::ReclaimFinalizeBlocked {
                 full_name: key,
                 token: String::new(),
@@ -84,6 +89,7 @@ impl TlaRegistry {
             return PromiseOrValue::Value(());
         }
         if let BalanceGate::Blocked { token, reason } = ft_balances_clear(&allowlist) {
+            self.reclaim_pending.remove(&key);
             Event::ReclaimFinalizeBlocked {
                 full_name: key,
                 token,
@@ -92,13 +98,14 @@ impl TlaRegistry {
             .emit();
             return PromiseOrValue::Value(());
         }
-        let sub_account: AccountId = match key.parse() {
-            Ok(a) => a,
+        let sub_account = match self.resolve_reclaimable(&tla_id, &key) {
+            Ok((sub_account, _)) => sub_account,
             Err(_) => {
+                self.reclaim_pending.remove(&key);
                 Event::ReclaimFinalizeBlocked {
                     full_name: key,
                     token: String::new(),
-                    reason: "invalid_sub_account_id".to_string(),
+                    reason: "no_longer_reclaimable".to_string(),
                 }
                 .emit();
                 return PromiseOrValue::Value(());
@@ -114,10 +121,11 @@ impl TlaRegistry {
         name: String,
         destination: AccountId,
     ) {
+        let key = sub_account_key(&tla_id, &name);
+        self.reclaim_pending.remove(&key);
         if !is_promise_success() {
             return;
         }
-        let key = sub_account_key(&tla_id, &name);
         let Some(removed) = self.sub_accounts.remove(&key) else {
             return;
         };
