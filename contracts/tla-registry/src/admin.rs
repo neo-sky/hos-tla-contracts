@@ -64,6 +64,9 @@ impl TlaRegistry {
             .tlas
             .get_mut(&tla_id)
             .ok_or(ContractError::TlaNotFound)?;
+        if entry.status == TlaStatus::Registered {
+            return Err(ContractError::TlaNotActive);
+        }
         entry.status = TlaStatus::Suspended;
         Event::TlaSuspended {
             tla_id,

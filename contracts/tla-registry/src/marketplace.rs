@@ -71,6 +71,24 @@ impl TlaRegistry {
             .emit();
             return;
         }
+        if self.sub_accounts.get(&key).map(|s| s.owner.clone()).as_ref() != Some(&seller) {
+            Event::ListingRejected {
+                full_name: key,
+                seller,
+                reason: "owner_changed".to_string(),
+            }
+            .emit();
+            return;
+        }
+        if self.listings.get(&key).map(|l| l.settling).unwrap_or(false) {
+            Event::ListingRejected {
+                full_name: key,
+                seller,
+                reason: "settlement_in_progress".to_string(),
+            }
+            .emit();
+            return;
+        }
         self.listings.insert(
             key.clone(),
             Listing {
@@ -158,6 +176,26 @@ impl TlaRegistry {
             .emit();
             return;
         }
+        if self.sub_accounts.get(&key).map(|s| s.owner.clone()).as_ref() != Some(&seller) {
+            Event::OfferRejected {
+                full_name: key,
+                buyer,
+                seller,
+                reason: "owner_changed".to_string(),
+            }
+            .emit();
+            return;
+        }
+        if self.accepted_offers.get(&key).map(|o| o.settling).unwrap_or(false) {
+            Event::OfferRejected {
+                full_name: key,
+                buyer,
+                seller,
+                reason: "settlement_in_progress".to_string(),
+            }
+            .emit();
+            return;
+        }
         self.accepted_offers.insert(
             key.clone(),
             AcceptedOffer {
@@ -208,6 +246,10 @@ impl TlaRegistry {
         new_owner_key: PublicKey,
     ) -> Result<Promise, ContractError> {
         self.assert_not_paused()?;
+        validate_name(&name)?;
+        if !hos_common::is_ed25519(&new_owner_key) {
+            return Err(ContractError::NotEd25519);
+        }
         let key = sub_account_key(&tla_id, &name);
         self.assert_sale_idle(&key)?;
         self.assert_sellable(&key, &tla_id)?;
@@ -333,6 +375,7 @@ impl TlaRegistry {
     ) -> Result<(AccountId, AccountId), ContractError> {
         crate::assert_one_yocto()?;
         self.assert_not_paused()?;
+        validate_name(name)?;
         if price.0 == 0 {
             return Err(ContractError::InvalidPrice);
         }
@@ -385,6 +428,9 @@ impl TlaRegistry {
             .sub_accounts
             .get(key)
             .ok_or(ContractError::SubAccountNotFound)?;
+        if sub.tla_id != *tla_id {
+            return Err(ContractError::SubAccountTlaMismatch);
+        }
         if sub.retraction_at.is_some() {
             return Err(ContractError::RetractionPending);
         }

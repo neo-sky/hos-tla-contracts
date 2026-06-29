@@ -144,6 +144,18 @@ mod tla_admin {
     use super::*;
 
     #[test]
+    fn suspend_registered_tla_rejected() {
+        let mut c = deploy();
+        ctx(ADMIN, 0, 0);
+        c.register_tla(acc(TLA), TlaType::Open, PremiumCategory::Standard, None)
+            .unwrap();
+        assert!(matches!(
+            c.suspend_tla(acc(TLA)),
+            Err(ContractError::TlaNotActive)
+        ));
+    }
+
+    #[test]
     fn register_and_activate_open_tla() {
         let c = deploy_with_open_tla();
         let view = c.get_tla(acc(TLA)).unwrap();
@@ -534,6 +546,58 @@ mod marketplace {
             c.buy_sub_account(acc(TLA), "alice".to_string(), parked_key()),
             Err(ContractError::PriceNotMet)
         ));
+    }
+
+    #[test]
+    fn buy_rejects_non_ed25519_key() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        list_alice(&mut c, 10);
+        let secp = PublicKey::from_str(
+            "secp256k1:qMoRgcoXai4mBPsdbHi1wfyxF9TdbPCF4qSDQTRP3TfescSRoUdSx6nmeQoN3aiwGzwMyGXAb1gUjBTv5AY8DXj",
+        )
+        .unwrap();
+        ctx(BOB, 10, 2);
+        assert!(matches!(
+            c.buy_sub_account(acc(TLA), "alice".to_string(), secp),
+            Err(ContractError::NotEd25519)
+        ));
+    }
+
+    #[test]
+    fn buy_rejects_dotted_name() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        ctx(BOB, 10, 2);
+        assert!(matches!(
+            c.buy_sub_account(acc(TLA), "ali.ce".to_string(), parked_key()),
+            Err(ContractError::InvalidName { .. })
+        ));
+    }
+
+    #[test]
+    fn relist_verify_does_not_clear_settling_lock() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        list_alice(&mut c, 10);
+        ctx(BOB, 10, 2);
+        let _ = c
+            .buy_sub_account(acc(TLA), "alice".to_string(), parked_key())
+            .unwrap();
+        ctx(ALICE, 0, 2);
+        c.on_listing_verified(
+            acc(TLA),
+            "alice".to_string(),
+            U128(10),
+            parked_key(),
+            acc(ALICE),
+            signer_match(&parked_key()),
+        );
+        assert!(
+            c.get_listing(acc(TLA), "alice".to_string())
+                .unwrap()
+                .settling
+        );
     }
 
     #[test]

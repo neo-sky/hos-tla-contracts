@@ -27,6 +27,7 @@ impl TlaRegistry {
         ft: AccountId,
     ) -> Result<Promise, ContractError> {
         self.assert_not_paused()?;
+        validate_name(&name)?;
         if env::attached_deposit() < SWEEP_ATTACHED_REQUIRED {
             return Err(ContractError::InsufficientPayment);
         }
@@ -50,6 +51,7 @@ impl TlaRegistry {
         name: String,
     ) -> Result<Promise, ContractError> {
         self.assert_not_paused()?;
+        validate_name(&name)?;
         let key = sub_account_key(&tla_id, &name);
         self.assert_sale_idle(&key)?;
         if self.reclaim_pending.contains_key(&key) {
@@ -170,6 +172,9 @@ impl TlaRegistry {
             .sub_accounts
             .get(key)
             .ok_or(ContractError::SubAccountNotFound)?;
+        if sub.tla_id != *tla_id {
+            return Err(ContractError::SubAccountTlaMismatch);
+        }
         let total_refs = self
             .mother_use_count
             .get(&sub_account)

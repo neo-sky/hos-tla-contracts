@@ -50,6 +50,7 @@ pub enum ContractError {
     NotListed,
     SaleInProgress,
     ReclaimInProgress,
+    SubAccountTlaMismatch,
     SubAccountNotSellable,
     BusinessSubNotResellable,
     PriceNotMet,
