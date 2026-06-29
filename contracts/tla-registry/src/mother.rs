@@ -11,6 +11,9 @@ impl TlaRegistry {
     pub fn set_mother(&mut self, new_mother: AccountId) -> Result<(), ContractError> {
         crate::assert_one_yocto()?;
         self.assert_not_paused()?;
+        if !self.sub_accounts.contains_key(new_mother.as_str()) {
+            return Err(ContractError::SubAccountNotFound);
+        }
         let caller = env::predecessor_account_id();
         self.set_mother_internal(&caller, &new_mother, "explicit")
     }
@@ -34,7 +37,9 @@ impl TlaRegistry {
             .mothers
             .remove(&user)
             .ok_or(ContractError::MotherNotSet)?;
-        self.decrement_mother_use(&previous);
+        if self.sub_accounts.contains_key(previous.as_str()) {
+            self.decrement_mother_use(&previous);
+        }
         Event::MotherCleared {
             user,
             previous_mother: previous,
@@ -91,7 +96,9 @@ impl TlaRegistry {
             if &old_mother == new_mother {
                 return Ok(());
             }
-            self.decrement_mother_use(&old_mother);
+            if self.sub_accounts.contains_key(old_mother.as_str()) {
+                self.decrement_mother_use(&old_mother);
+            }
         }
         self.mothers.insert(user.clone(), new_mother.clone());
         if new_mother_is_managed {

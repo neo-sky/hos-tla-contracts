@@ -37,6 +37,12 @@ impl TlaRegistry {
             return Err(ContractError::TokenNotInAllowlist);
         }
         let (sub_account, destination) = self.resolve_reclaimable(&tla_id, &key)?;
+        let caller = env::predecessor_account_id();
+        self.refund_excess(
+            &caller,
+            env::attached_deposit().as_yoctonear(),
+            SWEEP_ATTACHED_REQUIRED.as_yoctonear(),
+        );
 
         Ok(ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_HOS_SWEEP)
@@ -126,6 +132,12 @@ impl TlaRegistry {
         let key = sub_account_key(&tla_id, &name);
         self.reclaim_pending.remove(&key);
         if !is_promise_success() {
+            Event::ReclaimFinalizeBlocked {
+                full_name: key,
+                token: String::new(),
+                reason: "park_failed".to_string(),
+            }
+            .emit();
             return;
         }
         let Some(removed) = self.sub_accounts.remove(&key) else {

@@ -4,7 +4,7 @@ use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
 use near_sdk::json_types::U128;
 use near_sdk::serde::Serialize;
-use near_sdk::{near, AccountId, FunctionError};
+use near_sdk::{near, AccountId};
 
 #[near]
 impl TlaRegistry {
@@ -17,10 +17,7 @@ impl TlaRegistry {
     pub fn get_sub_account(&self, tla_id: AccountId, name: String) -> Option<SubAccountView> {
         let key = sub_account_key(&tla_id, &name);
         let sub = self.sub_accounts.get(&key)?;
-        let tla = match self.tlas.get(&tla_id) {
-            Some(t) => t,
-            None => ContractError::TlaNotFound.panic(),
-        };
+        let tla = self.tlas.get(&tla_id)?;
         Some(to_sub_view(
             &key,
             sub,
@@ -74,7 +71,12 @@ impl TlaRegistry {
     ) -> Result<RentPriceView, ContractError> {
         let tla = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
         let rent = fees::calculate_rent(tla, &tla_id, &name, &self.fee_config);
-        let deposit = self.fee_config.account_creation_deposit.0;
+        let key = sub_account_key(&tla_id, &name);
+        let deposit = if self.parked_names.contains_key(&key) {
+            0
+        } else {
+            self.fee_config.account_creation_deposit.0
+        };
         Ok(RentPriceView {
             rent_yocto: U128(rent),
             creation_deposit_yocto: U128(deposit),

@@ -35,7 +35,6 @@ pub enum ContractError {
     AllRentTiersZero,
     CreationDepositZero,
     CannotRemoveLastAdmin,
-    AlreadyAtCurrentVersion,
     SubAccountIsMother,
     MotherIsReclaimable,
     MotherNotSet,

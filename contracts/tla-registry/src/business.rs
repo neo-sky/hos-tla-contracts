@@ -134,8 +134,7 @@ impl TlaRegistry {
         let tla_rent = fees::base_rent(tla_len, &self.fee_config);
         let per_sub = self.fee_config.sub_fee_per_account.0;
         let count = self.business_sub_count.get(&tla_id).copied().unwrap_or(0);
-        let subs_total = per_sub.saturating_mul(u128::from(count));
-        let total = tla_rent.saturating_add(subs_total);
+        let total = tla_rent;
         Ok(BusinessRenewalCostView {
             tla_id,
             tla_rent_yocto: U128(tla_rent),

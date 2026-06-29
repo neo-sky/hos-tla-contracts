@@ -97,6 +97,15 @@ impl TlaRegistry {
             grace_period_ns.0 >= MIN_GRACE_PERIOD_NS,
             "grace period too short"
         );
+        require!(
+            hos_extension != active_signer,
+            "extension and signer must differ"
+        );
+        let this = env::current_account_id();
+        require!(
+            hos_extension != this && active_signer != this,
+            "wiring must not point at the registry"
+        );
         let mut admins = IterableSet::new(StorageKey::Admins);
         admins.insert(admin);
 
@@ -183,16 +192,6 @@ impl TlaRegistry {
             reason: "transfer_failed".to_string(),
         }
         .emit();
-    }
-
-    #[handle_result]
-    pub fn migrate(&mut self) -> Result<(), ContractError> {
-        self.assert_admin()?;
-        if self.version >= CONTRACT_VERSION {
-            return Err(ContractError::AlreadyAtCurrentVersion);
-        }
-        self.version = CONTRACT_VERSION;
-        Ok(())
     }
 
     pub fn get_version(&self) -> u8 {
