@@ -34,8 +34,8 @@ pub enum Event {
         destination: AccountId,
         by: AccountId,
     },
-    // Signals the ft_transfer was dispatched (scheduled via the wallet's detached
-    // out-promise), not that it has settled. The registry re-reads balances before parking.
+    // Signals an MPC signature was produced for the ft_transfer, not that it has settled;
+    // a relay still has to broadcast it. The registry re-reads balances before parking.
     #[event_version("1.0.0")]
     SweepDispatched {
         wallet: AccountId,

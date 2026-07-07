@@ -1,14 +1,12 @@
 mod error;
 mod events;
 
-use std::collections::BTreeSet;
-
 use crate::error::ContractError;
 use crate::events::Event;
-use defuse_wallet::{ext_wallet, FunctionCallAction, PromiseSingle, Request};
+use hos_common::tx::TxAction;
 use near_sdk::borsh::BorshSerialize;
-use near_sdk::json_types::U128;
-use near_sdk::serde_json::json;
+use near_sdk::json_types::{Base58CryptoHash, Base64VecU8, U128, U64};
+use near_sdk::serde_json::{json, Value};
 use near_sdk::store::IterableSet;
 use near_sdk::{
     env, ext_contract, near, AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise,
@@ -20,13 +18,11 @@ const CONTRACT_VERSION: u8 = 1;
 const GAS_FOR_SWAP_OWNER: Gas = Gas::from_tgas(8);
 const GAS_FOR_SWAP_CB: Gas = Gas::from_tgas(10);
 const GAS_FOR_RESET: Gas = Gas::from_tgas(5);
-const GAS_FOR_EXT_QUERY: Gas = Gas::from_tgas(5);
-const GAS_FOR_EXT_VERIFY_CB: Gas = Gas::from_tgas(25);
 const GAS_FOR_BALANCE_QUERY: Gas = Gas::from_tgas(5);
-const GAS_FOR_BALANCE_CB: Gas = Gas::from_tgas(35);
+const GAS_FOR_BALANCE_CB: Gas = Gas::from_tgas(105);
 const GAS_FOR_STORAGE_DEPOSIT: Gas = Gas::from_tgas(10);
-const GAS_FOR_STORAGE_CB: Gas = Gas::from_tgas(30);
-const GAS_FOR_EXTENSION_CALL: Gas = Gas::from_tgas(20);
+const GAS_FOR_STORAGE_CB: Gas = Gas::from_tgas(90);
+const GAS_FOR_AUTHORITY_SIGN: Gas = Gas::from_tgas(75);
 const GAS_FOR_SETTLE_CB: Gas = Gas::from_tgas(8);
 const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(10);
 
@@ -35,9 +31,6 @@ const STORAGE_DEPOSIT_AMOUNT: NearToken =
 const MIN_SWEEP_ATTACHED: NearToken =
     NearToken::from_yoctonear(hos_common::FT_STORAGE_DEPOSIT_YOCTO + 1);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
-
-const EXT_QUERY_FAILED: &str = "could not read wallet extension set";
-const NON_CANONICAL_EXTENSIONS: &str = "wallet extension set is not canonical";
 
 #[allow(dead_code)]
 #[ext_contract(ext_ft)]
@@ -54,6 +47,14 @@ trait ActiveSigner {
         wallet: AccountId,
         new_public_key: String,
         expected_current: Option<String>,
+    );
+    fn authority_sign_tx(
+        &mut self,
+        wallet: AccountId,
+        receiver_id: AccountId,
+        actions: Vec<TxAction>,
+        tx_nonce: U64,
+        block_hash: Base58CryptoHash,
     );
 }
 
@@ -191,39 +192,14 @@ impl HosExtension {
             by: env::predecessor_account_id(),
         }
         .emit();
-        Ok(ext_wallet::ext(wallet.clone())
-            .with_static_gas(GAS_FOR_EXT_QUERY)
-            .w_extensions()
-            .then(
-                Self::ext(env::current_account_id())
-                    .with_static_gas(GAS_FOR_EXT_VERIFY_CB)
-                    .after_extensions_checked(wallet, raw_key, expected_raw),
-            ))
-    }
-
-    #[private]
-    pub fn after_extensions_checked(
-        &mut self,
-        wallet: AccountId,
-        new_public_key: String,
-        expected_current: Option<String>,
-        #[callback_result] extensions: Result<BTreeSet<AccountId>, PromiseError>,
-    ) -> Promise {
-        let extensions = extensions.unwrap_or_else(|_| env::panic_str(EXT_QUERY_FAILED));
-        let mut canonical = BTreeSet::new();
-        canonical.insert(self.active_signer.clone());
-        canonical.insert(env::current_account_id());
-        if extensions != canonical {
-            env::panic_str(NON_CANONICAL_EXTENSIONS);
-        }
-        ext_active_signer::ext(self.active_signer.clone())
+        Ok(ext_active_signer::ext(self.active_signer.clone())
             .with_static_gas(GAS_FOR_SWAP_OWNER)
-            .swap_owner(wallet.clone(), new_public_key, expected_current)
+            .swap_owner(wallet.clone(), raw_key, expected_raw)
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_FOR_SWAP_CB)
                     .after_force_swap(wallet),
-            )
+            ))
     }
 
     #[private]
@@ -254,6 +230,8 @@ impl HosExtension {
         wallet: AccountId,
         ft: AccountId,
         destination: AccountId,
+        tx_nonce: U64,
+        block_hash: Base58CryptoHash,
     ) -> Result<Promise, ContractError> {
         self.assert_registry()?;
         self.assert_not_paused()?;
@@ -273,7 +251,7 @@ impl HosExtension {
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_FOR_BALANCE_CB)
-                    .after_balance_for_sweep(wallet, ft, destination),
+                    .after_balance_for_sweep(wallet, ft, destination, tx_nonce, block_hash),
             ))
     }
 
@@ -283,8 +261,10 @@ impl HosExtension {
         wallet: AccountId,
         ft: AccountId,
         destination: AccountId,
+        tx_nonce: U64,
+        block_hash: Base58CryptoHash,
         #[callback_result] balance: Result<U128, PromiseError>,
-    ) -> PromiseOrValue<()> {
+    ) -> PromiseOrValue<Option<Value>> {
         let balance = match balance {
             Ok(v) => v.0,
             Err(_) => {
@@ -311,7 +291,14 @@ impl HosExtension {
                 .then(
                     Self::ext(env::current_account_id())
                         .with_static_gas(GAS_FOR_STORAGE_CB)
-                        .after_storage_for_sweep(wallet, ft, destination, U128(balance)),
+                        .after_storage_for_sweep(
+                            wallet,
+                            ft,
+                            destination,
+                            U128(balance),
+                            tx_nonce,
+                            block_hash,
+                        ),
                 ),
         )
     }
@@ -323,7 +310,9 @@ impl HosExtension {
         ft: AccountId,
         destination: AccountId,
         balance: U128,
-    ) -> PromiseOrValue<()> {
+        tx_nonce: U64,
+        block_hash: Base58CryptoHash,
+    ) -> PromiseOrValue<Option<Value>> {
         if !near_sdk::is_promise_success() {
             return self.abort_and_refund(Event::SweepFailed {
                 wallet,
@@ -332,13 +321,19 @@ impl HosExtension {
             });
         }
 
-        let request = sweep_request(&ft, &destination, balance);
+        let action = sweep_action(&destination, balance);
 
         PromiseOrValue::Promise(
-            ext_wallet::ext(wallet.clone())
+            ext_active_signer::ext(self.active_signer.clone())
                 .with_attached_deposit(ONE_YOCTO)
-                .with_static_gas(GAS_FOR_EXTENSION_CALL)
-                .w_execute_extension(request)
+                .with_static_gas(GAS_FOR_AUTHORITY_SIGN)
+                .authority_sign_tx(
+                    wallet.clone(),
+                    ft.clone(),
+                    vec![action],
+                    tx_nonce,
+                    block_hash,
+                )
                 .then(
                     Self::ext(env::current_account_id())
                         .with_static_gas(GAS_FOR_SETTLE_CB)
@@ -354,24 +349,28 @@ impl HosExtension {
         ft: AccountId,
         destination: AccountId,
         amount: U128,
-    ) {
-        // success here means the wallet accepted and scheduled the ft_transfer, which it
-        // emits as a detached out-promise; this confirms dispatch, not final settlement.
-        if near_sdk::is_promise_success() {
-            Event::SweepDispatched {
-                wallet,
-                ft,
-                destination,
-                amount,
+        #[callback_result] signed: Result<Value, PromiseError>,
+    ) -> Option<Value> {
+        match signed {
+            Ok(signed) if !signed.is_null() => {
+                Event::SweepDispatched {
+                    wallet,
+                    ft,
+                    destination,
+                    amount,
+                }
+                .emit();
+                Some(signed)
             }
-            .emit();
-        } else {
-            Event::SweepFailed {
-                wallet,
-                ft,
-                reason: "wallet_execute_failed".to_string(),
+            _ => {
+                Event::SweepFailed {
+                    wallet,
+                    ft,
+                    reason: "authority_sign_failed".to_string(),
+                }
+                .emit();
+                None
             }
-            .emit();
         }
     }
 
@@ -430,9 +429,10 @@ impl HosExtension {
         Promise::new(self.registry.clone()).transfer(amount)
     }
 
-    fn abort_and_refund(&self, event: Event) -> PromiseOrValue<()> {
+    fn abort_and_refund(&self, event: Event) -> PromiseOrValue<Option<Value>> {
         event.emit();
-        PromiseOrValue::Promise(self.refund_registry(MIN_SWEEP_ATTACHED))
+        let _ = self.refund_registry(MIN_SWEEP_ATTACHED);
+        PromiseOrValue::Value(None)
     }
 }
 
@@ -440,16 +440,20 @@ fn ed25519_base58(key: &PublicKey) -> Result<String, ContractError> {
     hos_common::ed25519_base58(key).ok_or(ContractError::NotEd25519)
 }
 
-fn sweep_request(ft: &AccountId, destination: &AccountId, amount: U128) -> Request {
-    let transfer = FunctionCallAction::new("ft_transfer")
-        .args_json(json!({
-            "receiver_id": destination,
-            "amount": amount,
-            "memo": "hos-tla reclaim",
-        }))
-        .attached_deposit(ONE_YOCTO)
-        .min_gas(GAS_FOR_FT_TRANSFER);
-    Request::new().out(PromiseSingle::new(ft.clone()).function_call(transfer))
+fn sweep_action(destination: &AccountId, amount: U128) -> TxAction {
+    let args = json!({
+        "receiver_id": destination,
+        "amount": amount,
+        "memo": "hos-tla reclaim",
+    })
+    .to_string()
+    .into_bytes();
+    TxAction::FunctionCall {
+        method_name: "ft_transfer".to_string(),
+        args: Base64VecU8(args),
+        gas: GAS_FOR_FT_TRANSFER,
+        deposit: ONE_YOCTO,
+    }
 }
 
 #[cfg(test)]

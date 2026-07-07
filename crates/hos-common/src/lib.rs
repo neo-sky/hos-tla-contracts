@@ -1,3 +1,5 @@
+pub mod tx;
+
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{env, CurveType, PublicKey};
 

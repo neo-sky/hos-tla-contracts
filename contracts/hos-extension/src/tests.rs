@@ -37,6 +37,14 @@ fn sweep_deposit() -> u128 {
     MIN_SWEEP_ATTACHED.as_yoctonear()
 }
 
+fn nonce() -> U64 {
+    U64(1)
+}
+
+fn block_hash() -> Base58CryptoHash {
+    Base58CryptoHash::from([0u8; 32])
+}
+
 #[test]
 fn registry_force_transfer_returns_promise() {
     let mut c = deploy();
@@ -131,7 +139,7 @@ fn force_transfer_rejects_secp256k1() {
 fn registry_sweep_ft_returns_promise() {
     let mut c = deploy();
     ctx(REGISTRY, sweep_deposit());
-    let _ = c.sweep_ft(acc(WALLET), acc(TOKEN), acc(DEST));
+    let _ = c.sweep_ft(acc(WALLET), acc(TOKEN), acc(DEST), nonce(), block_hash());
 }
 
 #[test]
@@ -139,7 +147,7 @@ fn sweep_ft_rejects_outsider() {
     let mut c = deploy();
     ctx("attacker.testnet", sweep_deposit());
     assert!(matches!(
-        c.sweep_ft(acc(WALLET), acc(TOKEN), acc(DEST)),
+        c.sweep_ft(acc(WALLET), acc(TOKEN), acc(DEST), nonce(), block_hash()),
         Err(ContractError::OnlyRegistry)
     ));
 }
@@ -149,7 +157,7 @@ fn sweep_ft_rejects_underfunded() {
     let mut c = deploy();
     ctx(REGISTRY, sweep_deposit() - 1);
     assert!(matches!(
-        c.sweep_ft(acc(WALLET), acc(TOKEN), acc(DEST)),
+        c.sweep_ft(acc(WALLET), acc(TOKEN), acc(DEST), nonce(), block_hash()),
         Err(ContractError::InsufficientDeposit)
     ));
 }
@@ -161,7 +169,7 @@ fn sweep_ft_rejects_when_paused() {
     c.pause().unwrap();
     ctx(REGISTRY, sweep_deposit());
     assert!(matches!(
-        c.sweep_ft(acc(WALLET), acc(TOKEN), acc(DEST)),
+        c.sweep_ft(acc(WALLET), acc(TOKEN), acc(DEST), nonce(), block_hash()),
         Err(ContractError::Paused)
     ));
 }
@@ -169,76 +177,85 @@ fn sweep_ft_rejects_when_paused() {
 #[test]
 fn zero_balance_skips_sweep() {
     let mut c = deploy();
-    ctx(acc("hos-extension.testnet").as_str(), 0);
-    let out = c.after_balance_for_sweep(acc(WALLET), acc(TOKEN), acc(DEST), Ok(U128(0)));
-    assert!(matches!(out, PromiseOrValue::Promise(_)));
+    ctx("hos-extension.testnet", 0);
+    let out = c.after_balance_for_sweep(
+        acc(WALLET),
+        acc(TOKEN),
+        acc(DEST),
+        nonce(),
+        block_hash(),
+        Ok(U128(0)),
+    );
+    assert!(matches!(out, PromiseOrValue::Value(None)));
 }
 
 #[test]
 fn failed_balance_query_skips_sweep() {
     let mut c = deploy();
-    ctx(acc("hos-extension.testnet").as_str(), 0);
+    ctx("hos-extension.testnet", 0);
     let out = c.after_balance_for_sweep(
         acc(WALLET),
         acc(TOKEN),
         acc(DEST),
+        nonce(),
+        block_hash(),
         Err(PromiseError::Failed),
     );
-    assert!(matches!(out, PromiseOrValue::Promise(_)));
+    assert!(matches!(out, PromiseOrValue::Value(None)));
 }
 
 #[test]
 fn nonzero_balance_continues_sweep() {
     let mut c = deploy();
-    ctx(acc("hos-extension.testnet").as_str(), 0);
-    let out = c.after_balance_for_sweep(acc(WALLET), acc(TOKEN), acc(DEST), Ok(U128(1_000_000)));
+    ctx("hos-extension.testnet", 0);
+    let out = c.after_balance_for_sweep(
+        acc(WALLET),
+        acc(TOKEN),
+        acc(DEST),
+        nonce(),
+        block_hash(),
+        Ok(U128(1_000_000)),
+    );
     assert!(matches!(out, PromiseOrValue::Promise(_)));
 }
 
-fn canonical_set() -> BTreeSet<AccountId> {
-    let mut set = BTreeSet::new();
-    set.insert(acc(SIGNER));
-    set.insert(acc("hos-extension.testnet"));
-    set
+#[test]
+fn settled_signature_reports_dispatch() {
+    let mut c = deploy();
+    ctx("hos-extension.testnet", 0);
+    let signed = near_sdk::serde_json::json!({
+        "payload_hash": "ab",
+        "unsigned_tx_hex": "cd",
+        "mpc_signature": { "scheme": "Ed25519", "signature": [] },
+    });
+    let out = c.after_sweep_settled(acc(WALLET), acc(TOKEN), acc(DEST), U128(5), Ok(signed));
+    assert!(out.is_some());
+    let logs = near_sdk::test_utils::get_logs();
+    assert!(logs.iter().any(|l| l.contains("sweep_dispatched")));
 }
 
 #[test]
-fn canonical_extension_set_proceeds_to_swap() {
+fn settled_null_reports_failure() {
     let mut c = deploy();
     ctx("hos-extension.testnet", 0);
-    let raw = ed25519_base58(&key()).unwrap();
-    let _ = c.after_extensions_checked(acc(WALLET), raw, None, Ok(canonical_set()));
+    let out = c.after_sweep_settled(acc(WALLET), acc(TOKEN), acc(DEST), U128(5), Ok(Value::Null));
+    assert!(out.is_none());
+    let logs = near_sdk::test_utils::get_logs();
+    assert!(logs.iter().any(|l| l.contains("sweep_failed")));
 }
 
 #[test]
-#[should_panic(expected = "wallet extension set is not canonical")]
-fn extra_extension_blocks_transfer() {
+fn settled_error_reports_failure() {
     let mut c = deploy();
     ctx("hos-extension.testnet", 0);
-    let mut set = canonical_set();
-    set.insert(acc("backdoor.testnet"));
-    let raw = ed25519_base58(&key()).unwrap();
-    let _ = c.after_extensions_checked(acc(WALLET), raw, None, Ok(set));
-}
-
-#[test]
-#[should_panic(expected = "wallet extension set is not canonical")]
-fn missing_active_signer_blocks_transfer() {
-    let mut c = deploy();
-    ctx("hos-extension.testnet", 0);
-    let mut set = BTreeSet::new();
-    set.insert(acc("hos-extension.testnet"));
-    let raw = ed25519_base58(&key()).unwrap();
-    let _ = c.after_extensions_checked(acc(WALLET), raw, None, Ok(set));
-}
-
-#[test]
-#[should_panic(expected = "could not read wallet extension set")]
-fn failed_extension_query_blocks_transfer() {
-    let mut c = deploy();
-    ctx("hos-extension.testnet", 0);
-    let raw = ed25519_base58(&key()).unwrap();
-    let _ = c.after_extensions_checked(acc(WALLET), raw, None, Err(PromiseError::Failed));
+    let out = c.after_sweep_settled(
+        acc(WALLET),
+        acc(TOKEN),
+        acc(DEST),
+        U128(5),
+        Err(PromiseError::Failed),
+    );
+    assert!(out.is_none());
 }
 
 #[test]
@@ -249,10 +266,24 @@ fn ed25519_base58_strips_curve_prefix() {
 }
 
 #[test]
-fn sweep_request_targets_token_contract() {
-    let request = sweep_request(&acc(TOKEN), &acc(DEST), U128(5));
-    assert!(!request.out.is_empty());
-    assert!(request.ops.is_empty());
+fn sweep_action_targets_ft_transfer() {
+    let action = sweep_action(&acc(DEST), U128(5));
+    match action {
+        TxAction::FunctionCall {
+            method_name,
+            args,
+            gas,
+            deposit,
+        } => {
+            assert_eq!(method_name, "ft_transfer");
+            assert_eq!(gas, GAS_FOR_FT_TRANSFER);
+            assert_eq!(deposit, ONE_YOCTO);
+            let parsed: Value = near_sdk::serde_json::from_slice(&args.0).unwrap();
+            assert_eq!(parsed["receiver_id"], DEST);
+            assert_eq!(parsed["amount"], "5");
+        }
+        TxAction::Transfer { .. } => panic!("expected function call"),
+    }
 }
 
 #[test]

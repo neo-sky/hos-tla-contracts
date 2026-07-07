@@ -26,7 +26,7 @@ pub struct PendingReRent {
 const GAS_FOR_CREATE: Gas = Gas::from_tgas(90);
 const GAS_FOR_CALLBACK: Gas = Gas::from_tgas(15);
 const GAS_FOR_RERENT_FORCE: Gas = Gas::from_tgas(45);
-const GAS_FOR_RETRY_INSTALL: Gas = Gas::from_tgas(20);
+const GAS_FOR_RETRY_INSTALL: Gas = Gas::from_tgas(30);
 const GAS_FOR_RERENT_BALANCES_CB: Gas = Gas::from_tgas(85);
 
 #[near]

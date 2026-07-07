@@ -1,6 +1,7 @@
 # Version lock: Valhalla audit
 
-Built from the `valhalla-audit` tag.
+Audit builds are cut from an annotated tag; the hand-off tree is whatever that tag
+points at.
 
 ## Toolchain and build
 
@@ -12,14 +13,18 @@ Built from the `valhalla-audit` tag.
 
 ## Contract wasm sha256
 
-The per-crate sha256 are recorded in the annotated `valhalla-audit` tag message
-(`git show valhalla-audit`), built at the exact tag commit. They are kept in the tag
-rather than in this file on purpose: cargo-near stamps each wasm with NEP-330
+The existing `valhalla-audit` tag predates the MPC FullAccess key rework (the
+hos-wallet contract is gone and every remaining contract changed), so the hashes
+recorded in that tag no longer describe this tree. Fresh hashes are generated when
+the next audit tag is cut. They will live in the annotated tag message rather than
+in this file, on purpose: cargo-near stamps each wasm with NEP-330
 `contract_source_metadata` that embeds the source commit hash, so the bytes are
-commit-specific and any commit that recorded the hashes in-tree would invalidate them.
+commit-specific and any commit that recorded the hashes in-tree would invalidate
+them.
 
-`dev-contracts/test-ft` and the `integration/` workspace are out of audit scope.
+`dev-contracts/` (`test-ft`, `test-mpc`) and the `integration/` workspace are out
+of audit scope.
 
-To verify: check out the `valhalla-audit` tag, run `cargo near build reproducible-wasm`
+To verify a tagged build: check out the tag, run `cargo near build reproducible-wasm`
 in each contract crate, and compare each `target/near/<crate>/<crate>.wasm` sha256
-against the table in `git show valhalla-audit`.
+against the table in the tag message (`git show <tag>`).

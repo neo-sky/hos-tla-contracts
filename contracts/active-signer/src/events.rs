@@ -5,7 +5,11 @@ pub enum Event {
     #[event_version("1.0.0")]
     SignerInstalled { wallet: AccountId },
     #[event_version("1.0.0")]
-    RequestExecuted { wallet: AccountId, nonce: u32 },
+    TxSigned { wallet: AccountId, nonce: u32 },
+    #[event_version("1.0.0")]
+    MessageSigned { wallet: AccountId, nonce: u32 },
+    #[event_version("1.0.0")]
+    AuthorityTxSigned { wallet: AccountId },
     #[event_version("1.0.0")]
     OwnerSwapped { wallet: AccountId, by: String },
     #[event_version("1.0.0")]

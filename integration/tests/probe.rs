@@ -24,6 +24,7 @@ async fn sandbox_boots_and_runs_a_contract() -> Result<()> {
             "admin": root.id(),
             "marketplace_authority": root.id(),
             "recovery_authority": root.id(),
+            "mpc_signer": root.id(),
             "timeout_secs": 3600u32,
         }))
         .transact()

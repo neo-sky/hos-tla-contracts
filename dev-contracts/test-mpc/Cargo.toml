@@ -1,14 +1,19 @@
 [package]
-name = "hos-common"
+name = "test-mpc"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.86"
 repository = "https://github.com/neo-sky/hos-tla-contracts"
 license = "MIT OR Apache-2.0"
-description = "Shared pure helpers for the House of Stake TLA contract suite."
+description = "MPC signer stand-in used only by the integration test suite: derives a fixed ed25519 key and signs payloads with it. Not for deployment."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 near-sdk = { workspace = true }
+ed25519-dalek = { version = "2", default-features = false }
 
 [dev-dependencies]
 near-sdk = { workspace = true, features = ["unit-testing"] }

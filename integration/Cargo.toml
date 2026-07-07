@@ -13,6 +13,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde_json = "1"
 anyhow = "1"
 near-sdk = "=5.26.1"
+active-signer = { path = "../contracts/active-signer" }
+hos-common = { path = "../crates/hos-common" }
 near-primitives = { version = "0.34", features = ["test_utils"] }
 near-crypto = "0.34"
 near-jsonrpc-client = "0.20"

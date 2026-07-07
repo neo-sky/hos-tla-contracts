@@ -1,7 +1,5 @@
 use super::*;
 use defuse_wallet::signature::ed25519::Ed25519Signature;
-use defuse_wallet::signature::Deadline;
-use defuse_wallet::{Request, WalletOp};
 use defuse_wallet_sdk::ed25519::ed25519_dalek::ed25519::signature::Signer as DalekSigner;
 use defuse_wallet_sdk::ed25519::ed25519_dalek::SigningKey;
 use defuse_wallet_sdk::Signer;
@@ -12,11 +10,17 @@ const OWNER: &str = "hos.testnet";
 const MINTER: &str = "tla.testnet";
 const MARKET: &str = "hos-extension.testnet";
 const RECOVERY: &str = "mpc-recovery.testnet";
+const MPC: &str = "v1.signer.testnet";
 const WALLET: &str = "alice.tla.testnet";
+const MPC_KEY: &str = "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847";
 const TS: u64 = 1_000_000_000_000;
 
 fn acc(s: &str) -> AccountId {
     AccountId::from_str(s).unwrap()
+}
+
+fn mpc_key() -> PublicKey {
+    PublicKey::from_str(MPC_KEY).unwrap()
 }
 
 fn ctx(predecessor: &str, deposit: u128, ts: u64) {
@@ -30,7 +34,7 @@ fn ctx(predecessor: &str, deposit: u128, ts: u64) {
 
 fn deploy() -> ActiveSigner {
     ctx(OWNER, 0, 0);
-    let mut c = ActiveSigner::new(acc(OWNER), acc(MARKET), acc(RECOVERY), 3600);
+    let mut c = ActiveSigner::new(acc(OWNER), acc(MARKET), acc(RECOVERY), acc(MPC), 3600);
     ctx(OWNER, 0, 0);
     c.add_minter(acc(MINTER));
     c
@@ -42,48 +46,83 @@ fn key(seed: u8) -> SigningKey {
 
 fn install(c: &mut ActiveSigner, k: &SigningKey) {
     ctx(MINTER, 0, TS);
-    c.install_signer(acc(WALLET), Signer::public_key(k).to_string());
+    c.install_signer(acc(WALLET), Signer::public_key(k).to_string(), mpc_key());
 }
 
-fn sign(k: &SigningKey, nonce: u32) -> (RequestMessage, String) {
+fn now_secs() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as u32
+}
+
+fn sign_domain<M: BorshSerialize>(k: &SigningKey, msg: &M, domain: &[u8]) -> String {
     ctx("client.testnet", 0, TS);
-    let msg = RequestMessage {
+    let serialized = near_sdk::borsh::to_vec(msg).unwrap();
+    let hash = env::sha256_array([domain, &serialized].concat());
+    let signature = <SigningKey as DalekSigner<_>>::sign(k, &hash).to_bytes();
+    Ed25519Signature(signature).to_string()
+}
+
+fn tx_msg(nonce: u32) -> TxMessage {
+    TxMessage {
         chain_id: CHAIN_ID.to_string(),
         signer_id: acc(WALLET),
         nonce,
-        created_at: Deadline::now() - Duration::from_secs(60),
-        timeout: Duration::from_secs(3600),
-        request: Request::new(),
-    };
-    let proof = Signer::sign(k, &msg).unwrap();
+        created_at_secs: now_secs() - 60,
+        timeout_secs: 3600,
+        receiver_id: acc("bob.testnet"),
+        actions: vec![TxAction::Transfer {
+            deposit: NearToken::from_yoctonear(1),
+        }],
+    }
+}
+
+fn sign_tx(k: &SigningKey, nonce: u32) -> (TxMessage, String) {
+    let msg = tx_msg(nonce);
+    let proof = sign_domain(k, &msg, TX_DOMAIN);
     (msg, proof)
 }
 
-fn sign_freeze_msg(k: &SigningKey, msg: FreezeMessage, domain: &[u8]) -> (FreezeMessage, String) {
-    ctx("client.testnet", 0, TS);
-    let serialized = near_sdk::borsh::to_vec(&msg).unwrap();
-    let hash = env::sha256_array([domain, &serialized].concat());
-    let signature = <SigningKey as DalekSigner<_>>::sign(k, &hash).to_bytes();
-    let proof = Ed25519Signature(signature).to_string();
-    (msg, proof)
+fn submit(c: &mut ActiveSigner, msg: TxMessage, proof: String, deposit: u128) -> Promise {
+    ctx("relayer.testnet", deposit, TS);
+    c.submit_signed_tx(
+        acc(WALLET),
+        msg,
+        proof,
+        U64(1),
+        Base58CryptoHash::from([0u8; 32]),
+    )
+}
+
+fn message_request(nonce: u32) -> MessageRequest {
+    MessageRequest {
+        chain_id: CHAIN_ID.to_string(),
+        signer_id: acc(WALLET),
+        nonce,
+        created_at_secs: now_secs() - 60,
+        timeout_secs: 3600,
+        message: "login".to_string(),
+        recipient: "app.example.com".to_string(),
+        message_nonce: Base64VecU8(vec![0u8; 32]),
+        callback_url: None,
+    }
 }
 
 fn freeze_msg(nonce: u32) -> FreezeMessage {
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as u32;
     FreezeMessage {
         chain_id: CHAIN_ID.to_string(),
         signer_id: acc(WALLET),
         nonce,
-        created_at_secs: now_secs - 60,
+        created_at_secs: now_secs() - 60,
         timeout_secs: 3600,
     }
 }
 
 fn sign_freeze(k: &SigningKey, nonce: u32) -> (FreezeMessage, String) {
-    sign_freeze_msg(k, freeze_msg(nonce), FREEZE_DOMAIN)
+    let msg = freeze_msg(nonce);
+    let proof = sign_domain(k, &msg, FREEZE_DOMAIN);
+    (msg, proof)
 }
 
 #[test]
@@ -91,9 +130,8 @@ fn submit_verifies_and_updates_last_signed_at() {
     let mut c = deploy();
     let k = key(7);
     install(&mut c, &k);
-    let (msg, proof) = sign(&k, 1);
-    ctx("relayer.testnet", 1, TS);
-    let _ = c.submit_signed_request(acc(WALLET), msg, proof);
+    let (msg, proof) = sign_tx(&k, 1);
+    let _ = submit(&mut c, msg, proof, 1);
     assert_eq!(c.last_signed_at(acc(WALLET)), Some(TS));
 }
 
@@ -103,11 +141,9 @@ fn replayed_nonce_rejected() {
     let mut c = deploy();
     let k = key(7);
     install(&mut c, &k);
-    let (msg, proof) = sign(&k, 1);
-    ctx("relayer.testnet", 1, TS);
-    let _ = c.submit_signed_request(acc(WALLET), msg.clone(), proof.clone());
-    ctx("relayer.testnet", 1, TS);
-    let _ = c.submit_signed_request(acc(WALLET), msg, proof);
+    let (msg, proof) = sign_tx(&k, 1);
+    let _ = submit(&mut c, msg.clone(), proof.clone(), 1);
+    let _ = submit(&mut c, msg, proof, 1);
 }
 
 #[test]
@@ -115,9 +151,8 @@ fn replayed_nonce_rejected() {
 fn wrong_key_rejected() {
     let mut c = deploy();
     install(&mut c, &key(7));
-    let (msg, proof) = sign(&key(9), 1);
-    ctx("relayer.testnet", 1, TS);
-    let _ = c.submit_signed_request(acc(WALLET), msg, proof);
+    let (msg, proof) = sign_tx(&key(9), 1);
+    let _ = submit(&mut c, msg, proof, 1);
 }
 
 #[test]
@@ -126,45 +161,225 @@ fn wrong_chain_rejected() {
     let mut c = deploy();
     let k = key(7);
     install(&mut c, &k);
-    let (mut msg, proof) = sign(&k, 1);
+    let (mut msg, proof) = sign_tx(&k, 1);
     msg.chain_id = "testnet".to_string();
-    ctx("relayer.testnet", 1, TS);
-    let _ = c.submit_signed_request(acc(WALLET), msg, proof);
+    let _ = submit(&mut c, msg, proof, 1);
 }
 
 #[test]
-#[should_panic(expected = "wallet ops are not allowed")]
-fn signed_request_with_ops_rejected() {
+#[should_panic(expected = "actions must not be empty")]
+fn empty_actions_rejected() {
     let mut c = deploy();
     let k = key(7);
     install(&mut c, &k);
-    ctx("client.testnet", 0, TS);
-    let mut request = Request::new();
-    request.ops.push(WalletOp::AddExtension {
-        account_id: acc("backdoor.testnet"),
-    });
-    let msg = RequestMessage {
-        chain_id: CHAIN_ID.to_string(),
-        signer_id: acc(WALLET),
-        nonce: 1,
-        created_at: Deadline::now() - Duration::from_secs(60),
-        timeout: Duration::from_secs(3600),
-        request,
-    };
-    let proof = Signer::sign(&k, &msg).unwrap();
-    ctx("relayer.testnet", 1, TS);
-    let _ = c.submit_signed_request(acc(WALLET), msg, proof);
+    let mut msg = tx_msg(1);
+    msg.actions.clear();
+    let proof = sign_domain(&k, &msg, TX_DOMAIN);
+    let _ = submit(&mut c, msg, proof, 1);
 }
 
 #[test]
-#[should_panic(expected = "non-zero deposit required")]
+#[should_panic(expected = "invalid signature")]
+fn freeze_domain_sig_rejected_for_tx() {
+    let mut c = deploy();
+    let k = key(7);
+    install(&mut c, &k);
+    let msg = tx_msg(1);
+    let proof = sign_domain(&k, &msg, FREEZE_DOMAIN);
+    let _ = submit(&mut c, msg, proof, 1);
+}
+
+#[test]
+#[should_panic(expected = "exactly one yoctoNEAR required")]
 fn zero_deposit_rejected() {
     let mut c = deploy();
     let k = key(7);
     install(&mut c, &k);
-    let (msg, proof) = sign(&k, 1);
-    ctx("relayer.testnet", 0, TS);
-    let _ = c.submit_signed_request(acc(WALLET), msg, proof);
+    let (msg, proof) = sign_tx(&k, 1);
+    let _ = submit(&mut c, msg, proof, 0);
+}
+
+#[test]
+#[should_panic(expected = "exactly one yoctoNEAR required")]
+fn oversized_deposit_rejected() {
+    let mut c = deploy();
+    let k = key(7);
+    install(&mut c, &k);
+    let (msg, proof) = sign_tx(&k, 1);
+    let _ = submit(&mut c, msg, proof, 2);
+}
+
+#[test]
+fn message_sign_verifies_and_burns_nonce() {
+    let mut c = deploy();
+    let k = key(7);
+    install(&mut c, &k);
+    let msg = message_request(1);
+    let proof = sign_domain(&k, &msg, MESSAGE_DOMAIN);
+    ctx("relayer.testnet", 1, TS);
+    let _ = c.submit_signed_message(acc(WALLET), msg, proof);
+    assert_eq!(c.last_signed_at(acc(WALLET)), Some(TS));
+}
+
+#[test]
+#[should_panic(expected = "nonce already used")]
+fn message_replay_rejected() {
+    let mut c = deploy();
+    let k = key(7);
+    install(&mut c, &k);
+    let msg = message_request(1);
+    let proof = sign_domain(&k, &msg, MESSAGE_DOMAIN);
+    ctx("relayer.testnet", 1, TS);
+    let _ = c.submit_signed_message(acc(WALLET), msg.clone(), proof.clone());
+    ctx("relayer.testnet", 1, TS);
+    let _ = c.submit_signed_message(acc(WALLET), msg, proof);
+}
+
+#[test]
+#[should_panic(expected = "message nonce must be 32 bytes")]
+fn short_message_nonce_rejected() {
+    let mut c = deploy();
+    let k = key(7);
+    install(&mut c, &k);
+    let mut msg = message_request(1);
+    msg.message_nonce = Base64VecU8(vec![0u8; 31]);
+    let proof = sign_domain(&k, &msg, MESSAGE_DOMAIN);
+    ctx("relayer.testnet", 1, TS);
+    let _ = c.submit_signed_message(acc(WALLET), msg, proof);
+}
+
+#[test]
+#[should_panic(expected = "invalid signature")]
+fn tx_domain_sig_rejected_for_message() {
+    let mut c = deploy();
+    let k = key(7);
+    install(&mut c, &k);
+    let msg = message_request(1);
+    let proof = sign_domain(&k, &msg, TX_DOMAIN);
+    ctx("relayer.testnet", 1, TS);
+    let _ = c.submit_signed_message(acc(WALLET), msg, proof);
+}
+
+#[test]
+#[should_panic(expected = "nonce already used")]
+fn tx_and_message_share_nonce_space() {
+    let mut c = deploy();
+    let k = key(7);
+    install(&mut c, &k);
+    let (msg, proof) = sign_tx(&k, 1);
+    let _ = submit(&mut c, msg, proof, 1);
+    let msg = message_request(1);
+    let proof = sign_domain(&k, &msg, MESSAGE_DOMAIN);
+    ctx("relayer.testnet", 1, TS);
+    let _ = c.submit_signed_message(acc(WALLET), msg, proof);
+}
+
+#[test]
+fn authority_signs_for_marketplace() {
+    let mut c = deploy();
+    install(&mut c, &key(7));
+    ctx(MARKET, 1, TS);
+    let _ = c.authority_sign_tx(
+        acc(WALLET),
+        acc("usdc.testnet"),
+        vec![TxAction::FunctionCall {
+            method_name: "ft_transfer".to_string(),
+            args: Base64VecU8(br#"{"receiver_id":"bob.testnet","amount":"1"}"#.to_vec()),
+            gas: Gas::from_tgas(10),
+            deposit: NearToken::from_yoctonear(1),
+        }],
+        U64(1),
+        Base58CryptoHash::from([0u8; 32]),
+    );
+    assert_eq!(c.last_signed_at(acc(WALLET)), Some(TS));
+}
+
+#[test]
+#[should_panic(expected = "only marketplace authority")]
+fn authority_sign_rejects_outsider() {
+    let mut c = deploy();
+    install(&mut c, &key(7));
+    ctx("attacker.testnet", 1, TS);
+    let _ = c.authority_sign_tx(
+        acc(WALLET),
+        acc("usdc.testnet"),
+        vec![TxAction::Transfer {
+            deposit: NearToken::from_yoctonear(1),
+        }],
+        U64(1),
+        Base58CryptoHash::from([0u8; 32]),
+    );
+}
+
+#[test]
+#[should_panic(expected = "only marketplace authority")]
+fn authority_sign_rejects_recovery() {
+    let mut c = deploy();
+    install(&mut c, &key(7));
+    ctx(RECOVERY, 1, TS);
+    let _ = c.authority_sign_tx(
+        acc(WALLET),
+        acc("usdc.testnet"),
+        vec![TxAction::Transfer {
+            deposit: NearToken::from_yoctonear(1),
+        }],
+        U64(1),
+        Base58CryptoHash::from([0u8; 32]),
+    );
+}
+
+#[test]
+#[should_panic(expected = "frozen by recovery")]
+fn frozen_blocks_authority_sign() {
+    let mut c = deploy();
+    install(&mut c, &key(7));
+    ctx(RECOVERY, 0, TS);
+    c.freeze(acc(WALLET), None);
+    ctx(MARKET, 1, TS);
+    let _ = c.authority_sign_tx(
+        acc(WALLET),
+        acc("usdc.testnet"),
+        vec![TxAction::Transfer {
+            deposit: NearToken::from_yoctonear(1),
+        }],
+        U64(1),
+        Base58CryptoHash::from([0u8; 32]),
+    );
+}
+
+#[test]
+#[should_panic(expected = "actions must not be empty")]
+fn authority_sign_rejects_empty_actions() {
+    let mut c = deploy();
+    install(&mut c, &key(7));
+    ctx(MARKET, 1, TS);
+    let _ = c.authority_sign_tx(
+        acc(WALLET),
+        acc("usdc.testnet"),
+        Vec::new(),
+        U64(1),
+        Base58CryptoHash::from([0u8; 32]),
+    );
+}
+
+#[test]
+fn mpc_key_of_returns_installed_key() {
+    let mut c = deploy();
+    install(&mut c, &key(7));
+    assert_eq!(c.mpc_key_of(acc(WALLET)), Some(mpc_key()));
+    assert_eq!(c.mpc_key_of(acc("other.tla.testnet")), None);
+}
+
+#[test]
+#[should_panic(expected = "mpc key must be ed25519")]
+fn install_rejects_secp256k1_mpc_key() {
+    let mut c = deploy();
+    ctx(MINTER, 0, TS);
+    let secp = PublicKey::from_str(
+        "secp256k1:qMoRgcoXai4mBPsdbHi1wfyxF9TdbPCF4qSDQTRP3TfescSRoUdSx6nmeQoN3aiwGzwMyGXAb1gUjBTv5AY8DXj",
+    )
+    .unwrap();
+    c.install_signer(acc(WALLET), Signer::public_key(&key(7)).to_string(), secp);
 }
 
 #[test]
@@ -178,6 +393,15 @@ fn marketplace_swaps_owner() {
         c.signer_of(acc(WALLET)),
         Some(Signer::public_key(&new).to_string())
     );
+}
+
+#[test]
+fn swap_owner_preserves_mpc_key() {
+    let mut c = deploy();
+    install(&mut c, &key(7));
+    ctx(MARKET, 0, TS);
+    c.swap_owner(acc(WALLET), Signer::public_key(&key(8)).to_string(), None);
+    assert_eq!(c.mpc_key_of(acc(WALLET)), Some(mpc_key()));
 }
 
 #[test]
@@ -245,7 +469,7 @@ fn recovery_swap_with_stale_cas_voids_and_stays_frozen() {
 #[should_panic(expected = "timeout_secs out of bounds")]
 fn new_rejects_zero_timeout() {
     ctx(OWNER, 0, 0);
-    let _ = ActiveSigner::new(acc(OWNER), acc(MARKET), acc(RECOVERY), 0);
+    let _ = ActiveSigner::new(acc(OWNER), acc(MARKET), acc(RECOVERY), acc(MPC), 0);
 }
 
 #[test]
@@ -267,9 +491,8 @@ fn submit_and_self_freeze_use_independent_nonces() {
     let mut c = deploy();
     let k = key(7);
     install(&mut c, &k);
-    let (msg, proof) = sign(&k, 1);
-    ctx("relayer.testnet", 1, TS);
-    let _ = c.submit_signed_request(acc(WALLET), msg, proof);
+    let (msg, proof) = sign_tx(&k, 1);
+    let _ = submit(&mut c, msg, proof, 1);
     let (fmsg, fproof) = sign_freeze(&k, 1);
     ctx("relayer.testnet", 0, TS);
     c.self_freeze(acc(WALLET), fmsg, fproof);
@@ -320,9 +543,8 @@ fn frozen_blocks_submit() {
     install(&mut c, &k);
     ctx(RECOVERY, 0, TS);
     c.freeze(acc(WALLET), None);
-    let (msg, proof) = sign(&k, 1);
-    ctx("relayer.testnet", 1, TS);
-    let _ = c.submit_signed_request(acc(WALLET), msg, proof);
+    let (msg, proof) = sign_tx(&k, 1);
+    let _ = submit(&mut c, msg, proof, 1);
 }
 
 #[test]
@@ -341,7 +563,11 @@ fn frozen_blocks_marketplace_swap() {
 fn non_minter_cannot_install() {
     let mut c = deploy();
     ctx("attacker.testnet", 0, TS);
-    c.install_signer(acc(WALLET), Signer::public_key(&key(7)).to_string());
+    c.install_signer(
+        acc(WALLET),
+        Signer::public_key(&key(7)).to_string(),
+        mpc_key(),
+    );
 }
 
 #[test]
@@ -349,7 +575,11 @@ fn non_minter_cannot_install() {
 fn admin_is_not_implicitly_a_minter() {
     let mut c = deploy();
     ctx(OWNER, 0, TS);
-    c.install_signer(acc(WALLET), Signer::public_key(&key(7)).to_string());
+    c.install_signer(
+        acc(WALLET),
+        Signer::public_key(&key(7)).to_string(),
+        mpc_key(),
+    );
 }
 
 #[test]
@@ -360,6 +590,7 @@ fn install_rejects_wallet_outside_minter_namespace() {
     c.install_signer(
         acc("victim.other.testnet"),
         Signer::public_key(&key(7)).to_string(),
+        mpc_key(),
     );
 }
 
@@ -371,6 +602,7 @@ fn install_rejects_indirect_subaccount() {
     c.install_signer(
         acc("deep.alice.tla.testnet"),
         Signer::public_key(&key(7)).to_string(),
+        mpc_key(),
     );
 }
 
@@ -382,6 +614,7 @@ fn install_rejects_suffix_collision() {
     c.install_signer(
         acc("eviltla.testnet"),
         Signer::public_key(&key(7)).to_string(),
+        mpc_key(),
     );
 }
 
@@ -390,7 +623,11 @@ fn install_rejects_suffix_collision() {
 fn install_rejects_minter_account_itself() {
     let mut c = deploy();
     ctx(MINTER, 0, TS);
-    c.install_signer(acc(MINTER), Signer::public_key(&key(7)).to_string());
+    c.install_signer(
+        acc(MINTER),
+        Signer::public_key(&key(7)).to_string(),
+        mpc_key(),
+    );
 }
 
 #[test]
@@ -399,7 +636,11 @@ fn reinstall_rejected_when_signer_exists() {
     let mut c = deploy();
     install(&mut c, &key(7));
     ctx(MINTER, 0, TS);
-    c.install_signer(acc(WALLET), Signer::public_key(&key(8)).to_string());
+    c.install_signer(
+        acc(WALLET),
+        Signer::public_key(&key(8)).to_string(),
+        mpc_key(),
+    );
 }
 
 #[test]
@@ -410,7 +651,11 @@ fn reinstall_on_frozen_wallet_rejected() {
     ctx(RECOVERY, 0, TS);
     c.freeze(acc(WALLET), None);
     ctx(MINTER, 0, TS);
-    c.install_signer(acc(WALLET), Signer::public_key(&key(8)).to_string());
+    c.install_signer(
+        acc(WALLET),
+        Signer::public_key(&key(8)).to_string(),
+        mpc_key(),
+    );
 }
 
 #[test]
@@ -442,6 +687,7 @@ fn second_minter_can_install_a_different_wallet() {
     c.install_signer(
         acc("bob.tla2.testnet"),
         Signer::public_key(&key(9)).to_string(),
+        mpc_key(),
     );
     assert!(c.signer_of(acc("bob.tla2.testnet")).is_some());
 }
@@ -476,9 +722,8 @@ fn self_freeze_halts_submit() {
     ctx("relayer.testnet", 0, TS);
     c.self_freeze(acc(WALLET), fmsg, fproof);
     assert_eq!(c.is_frozen(acc(WALLET)), Some(true));
-    let (msg, proof) = sign(&k, 2);
-    ctx("relayer.testnet", 1, TS);
-    let _ = c.submit_signed_request(acc(WALLET), msg, proof);
+    let (msg, proof) = sign_tx(&k, 2);
+    let _ = submit(&mut c, msg, proof, 1);
 }
 
 #[test]
@@ -497,9 +742,10 @@ fn self_freeze_rejects_wallet_domain_sig() {
     let mut c = deploy();
     let k = key(7);
     install(&mut c, &k);
-    let (fmsg, fproof) = sign_freeze_msg(&k, freeze_msg(1), b"NEAR_WALLET_CONTRACT/V1");
+    let msg = freeze_msg(1);
+    let proof = sign_domain(&k, &msg, b"NEAR_WALLET_CONTRACT/V1");
     ctx("relayer.testnet", 0, TS);
-    c.self_freeze(acc(WALLET), fmsg, fproof);
+    c.self_freeze(acc(WALLET), msg, proof);
 }
 
 #[test]

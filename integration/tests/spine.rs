@@ -1,27 +1,37 @@
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::SystemTime;
 
+use active_signer::{TxMessage, CHAIN_ID, TX_DOMAIN};
 use anyhow::Result;
-use defuse_wallet::signature::{Deadline, RequestMessage};
-use defuse_wallet::{PromiseSingle, Request, WalletOp};
+use defuse_wallet::signature::ed25519::Ed25519Signature;
 use defuse_wallet_sdk::ed25519::ed25519_dalek::Signer as DalekSigner;
 use defuse_wallet_sdk::ed25519::ed25519_dalek::SigningKey;
 use defuse_wallet_sdk::Signer;
+use hos_common::tx::TxAction;
+use near_jsonrpc_client::{methods, JsonRpcClient};
+use near_jsonrpc_primitives::types::query::QueryResponseKind;
+use near_primitives::hash::CryptoHash;
+use near_primitives::transaction::{SignedTransaction, Transaction, TransactionV0};
+use near_primitives::types::BlockReference;
+use near_primitives::views::{FinalExecutionStatus, QueryRequest};
+use near_workspaces::network::Sandbox;
 use near_workspaces::types::{Gas, KeyType, NearToken, PublicKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 const ACTIVE_SIGNER_WASM: &str = "../target/near/active_signer/active_signer.wasm";
 const HOS_EXTENSION_WASM: &str = "../target/near/hos_extension/hos_extension.wasm";
-const HOS_WALLET_WASM: &str = "../target/near/hos_wallet/hos_wallet.wasm";
 const TEST_FT_WASM: &str = "../target/near/test_ft/test_ft.wasm";
+const TEST_MPC_WASM: &str = "../target/near/test_mpc/test_mpc.wasm";
 const MPC_RECOVERY_WASM: &str = "../target/near/mpc_recovery/mpc_recovery.wasm";
 
 const TIMEOUT_SECS: u32 = 3600;
+const MPC_SECRET: [u8; 32] = [42u8; 32];
 const SWEEP_ATTACHED: NearToken = NearToken::from_yoctonear(1_250_000_000_000_000_000_000 + 1);
 
 struct Harness {
-    worker: Worker<near_workspaces::network::Sandbox>,
+    worker: Worker<Sandbox>,
     admin: Account,
     registry: Account,
     tla: Account,
@@ -34,6 +44,19 @@ fn user_key(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])
 }
 
+fn mpc_key() -> SigningKey {
+    SigningKey::from_bytes(&MPC_SECRET)
+}
+
+fn mpc_secret_key() -> near_workspaces::types::SecretKey {
+    let signing = mpc_key();
+    let mut bytes = signing.to_bytes().to_vec();
+    bytes.extend_from_slice(signing.verifying_key().as_bytes());
+    format!("ed25519:{}", bs58::encode(bytes).into_string())
+        .parse()
+        .expect("valid ed25519 secret key")
+}
+
 fn raw_base58(key: &SigningKey) -> String {
     Signer::public_key(key).to_string()
 }
@@ -41,6 +64,13 @@ fn raw_base58(key: &SigningKey) -> String {
 fn ws_pubkey(key: &SigningKey) -> PublicKey {
     PublicKey::try_from_parts(KeyType::ED25519, key.verifying_key().as_bytes())
         .expect("valid ed25519 public key")
+}
+
+fn now_secs() -> u32 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as u32
 }
 
 async fn deploy_singleton(
@@ -85,6 +115,14 @@ async fn setup() -> Result<Harness> {
     let active_signer = deploy_singleton(&root, "asigner", 30, ACTIVE_SIGNER_WASM).await?;
     let hos_extension = deploy_singleton(&root, "hosext", 30, HOS_EXTENSION_WASM).await?;
     let mpc_recovery = deploy_singleton(&root, "mpcrec", 20, MPC_RECOVERY_WASM).await?;
+    let test_mpc = deploy_singleton(&root, "mpcsim", 20, TEST_MPC_WASM).await?;
+
+    test_mpc
+        .call("new")
+        .args_json(json!({ "secret": MPC_SECRET.to_vec() }))
+        .transact()
+        .await?
+        .into_result()?;
 
     active_signer
         .call("new")
@@ -92,6 +130,7 @@ async fn setup() -> Result<Harness> {
             "admin": admin.id(),
             "marketplace_authority": hos_extension.id(),
             "recovery_authority": mpc_recovery.id(),
+            "mpc_signer": test_mpc.id(),
             "timeout_secs": TIMEOUT_SECS,
         }))
         .transact()
@@ -146,24 +185,18 @@ async fn mint_wallet(h: &Harness, name: &str, owner: &SigningKey) -> Result<Acco
         .tla
         .create_subaccount(name)
         .initial_balance(NearToken::from_near(10))
-        .transact()
-        .await?
-        .into_result()?;
-
-    let wasm = std::fs::read(HOS_WALLET_WASM)?;
-    let wallet_contract = wallet.deploy(&wasm).await?.into_result()?;
-    wallet_contract
-        .call("new")
-        .args_json(json!({
-            "extensions": [h.active_signer.id(), h.hos_extension.id()],
-        }))
+        .keys(mpc_secret_key())
         .transact()
         .await?
         .into_result()?;
 
     h.tla
         .call(h.active_signer.id(), "install_signer")
-        .args_json(json!({ "wallet": wallet.id(), "public_key": raw_base58(owner) }))
+        .args_json(json!({
+            "wallet": wallet.id(),
+            "public_key": raw_base58(owner),
+            "mpc_public_key": ws_pubkey(&mpc_key()),
+        }))
         .transact()
         .await?
         .into_result()?;
@@ -177,92 +210,116 @@ fn signed_transfer(
     amount: NearToken,
     nonce: u32,
     key: &SigningKey,
-) -> (serde_json::Value, String) {
-    let signer_id = near_sdk::AccountId::from_str(wallet.as_str()).unwrap();
-    let recipient = near_sdk::AccountId::from_str(recipient.as_str()).unwrap();
-    let out = PromiseSingle::new(recipient)
-        .transfer(near_sdk::NearToken::from_yoctonear(amount.as_yoctonear()));
-    let msg = RequestMessage {
-        chain_id: "mainnet".to_string(),
-        signer_id,
+) -> (TxMessage, String) {
+    let msg = TxMessage {
+        chain_id: CHAIN_ID.to_string(),
+        signer_id: near_sdk::AccountId::from_str(wallet.as_str()).unwrap(),
         nonce,
-        created_at: Deadline::now() - Duration::from_secs(60),
-        timeout: Duration::from_secs(TIMEOUT_SECS as u64),
-        request: Request::new().out(out),
+        created_at_secs: now_secs() - 60,
+        timeout_secs: TIMEOUT_SECS,
+        receiver_id: near_sdk::AccountId::from_str(recipient.as_str()).unwrap(),
+        actions: vec![TxAction::Transfer {
+            deposit: near_sdk::NearToken::from_yoctonear(amount.as_yoctonear()),
+        }],
     };
-    let proof = Signer::sign(key, &msg).unwrap();
-    (serde_json::to_value(&msg).unwrap(), proof)
+    let proof = sign_envelope(key, &msg, TX_DOMAIN);
+    (msg, proof)
 }
 
-fn signed_add_extension(
-    wallet: &AccountId,
-    extension: &AccountId,
-    nonce: u32,
+fn sign_envelope<M: near_sdk::borsh::BorshSerialize>(
     key: &SigningKey,
-) -> (serde_json::Value, String) {
-    let signer_id = near_sdk::AccountId::from_str(wallet.as_str()).unwrap();
-    let extension = near_sdk::AccountId::from_str(extension.as_str()).unwrap();
-    let mut request = Request::new();
-    request.ops.push(WalletOp::AddExtension {
-        account_id: extension,
-    });
-    let msg = RequestMessage {
-        chain_id: "mainnet".to_string(),
-        signer_id,
-        nonce,
-        created_at: Deadline::now() - Duration::from_secs(60),
-        timeout: Duration::from_secs(TIMEOUT_SECS as u64),
-        request,
-    };
-    let proof = Signer::sign(key, &msg).unwrap();
-    (serde_json::to_value(&msg).unwrap(), proof)
+    msg: &M,
+    domain: &[u8],
+) -> String {
+    let serialized = near_sdk::borsh::to_vec(msg).unwrap();
+    let hash = Sha256::digest([domain, serialized.as_slice()].concat());
+    let signature = DalekSigner::sign(key, hash.as_slice()).to_bytes();
+    Ed25519Signature(signature).to_string()
+}
+
+async fn mpc_key_state(worker: &Worker<Sandbox>, wallet: &AccountId) -> Result<(u64, CryptoHash)> {
+    let client = JsonRpcClient::connect(worker.rpc_addr());
+    let account_id: near_primitives::types::AccountId = wallet.as_str().parse()?;
+    let public_key = near_crypto::PublicKey::from_str(&raw_base58(&mpc_key()))?;
+    let access = client
+        .call(methods::query::RpcQueryRequest {
+            block_reference: BlockReference::latest(),
+            request: QueryRequest::ViewAccessKey {
+                account_id,
+                public_key,
+            },
+        })
+        .await?;
+    match access.kind {
+        QueryResponseKind::AccessKey(ak) => Ok((ak.nonce, access.block_hash)),
+        _ => anyhow::bail!("unexpected query response for access key"),
+    }
 }
 
 async fn submit(
     h: &Harness,
     wallet: &AccountId,
-    msg: &serde_json::Value,
+    msg: &TxMessage,
     proof: &str,
+    tx_nonce: u64,
+    block_hash: CryptoHash,
 ) -> Result<near_workspaces::result::ExecutionFinalResult> {
     Ok(h.registry
-        .call(h.active_signer.id(), "submit_signed_request")
-        .args_json(json!({ "wallet": wallet, "msg": msg, "proof": proof }))
+        .call(h.active_signer.id(), "submit_signed_tx")
+        .args_json(json!({
+            "wallet": wallet,
+            "msg": msg,
+            "proof": proof,
+            "tx_nonce": tx_nonce.to_string(),
+            "block_hash": bs58::encode(block_hash.0).into_string(),
+        }))
         .deposit(NearToken::from_yoctonear(1))
         .gas(Gas::from_tgas(120))
         .transact()
         .await?)
 }
 
-#[tokio::test]
-async fn no_sign_path_is_rejected() -> Result<()> {
-    let h = setup().await?;
-    let owner = user_key(7);
-    let wallet = mint_wallet(&h, "alice", &owner).await?;
+async fn submit_offline(
+    h: &Harness,
+    wallet: &AccountId,
+    msg: &TxMessage,
+    proof: &str,
+) -> Result<near_workspaces::result::ExecutionFinalResult> {
+    submit(h, wallet, msg, proof, 1, CryptoHash([0u8; 32])).await
+}
 
-    let (msg, proof) = signed_transfer(
-        wallet.id(),
-        h.admin.id(),
-        NearToken::from_near(1),
-        1,
-        &owner,
-    );
-    let direct = h
-        .registry
-        .call(wallet.id(), "w_execute_signed")
-        .args_json(json!({ "msg": msg, "proof": proof }))
-        .deposit(NearToken::from_yoctonear(1))
-        .gas(Gas::from_tgas(60))
-        .transact()
+async fn broadcast_signed(worker: &Worker<Sandbox>, signed: &serde_json::Value) -> Result<()> {
+    let unsigned_hex = signed["unsigned_tx_hex"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing unsigned_tx_hex"))?;
+    let bytes: Vec<u8> = (0..unsigned_hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&unsigned_hex[i..i + 2], 16))
+        .collect::<Result<_, _>>()?;
+    let tx: TransactionV0 = near_sdk::borsh::from_slice(&bytes)?;
+
+    let sig_bytes: Vec<u8> = signed["mpc_signature"]["signature"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("missing mpc signature"))?
+        .iter()
+        .map(|v| v.as_u64().unwrap() as u8)
+        .collect();
+    let signature = near_crypto::Signature::from_parts(near_crypto::KeyType::ED25519, &sig_bytes)?;
+
+    let client = JsonRpcClient::connect(worker.rpc_addr());
+    let outcome = client
+        .call(methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest {
+            signed_transaction: SignedTransaction::new(signature, Transaction::V0(tx)),
+        })
         .await?;
-    assert!(
-        direct.is_failure(),
-        "no-sign wallet must reject w_execute_signed"
-    );
-    Ok(())
+    match outcome.status {
+        FinalExecutionStatus::SuccessValue(_) => Ok(()),
+        other => anyhow::bail!("broadcast failed: {other:?}"),
+    }
 }
 
 #[tokio::test]
-async fn signed_request_executes_through_active_signer() -> Result<()> {
+async fn signed_tx_executes_end_to_end() -> Result<()> {
     let h = setup().await?;
     let owner = user_key(7);
     let wallet = mint_wallet(&h, "alice", &owner).await?;
@@ -284,16 +341,27 @@ async fn signed_request_executes_through_active_signer() -> Result<()> {
         1,
         &owner,
     );
-    let exec = submit(&h, wallet.id(), &msg, &proof).await?;
+    let (tx_nonce, block_hash) = mpc_key_state(&h.worker, wallet.id()).await?;
+    let exec = submit(&h, wallet.id(), &msg, &proof, tx_nonce + 1, block_hash).await?;
+    assert!(exec.is_success(), "signed tx should be accepted: {exec:#?}");
+    let signed: serde_json::Value = exec.json()?;
     assert!(
-        exec.is_success(),
-        "signed request should execute: {exec:#?}"
+        !signed.is_null(),
+        "active-signer must return the MPC-signed payload"
+    );
+    assert_eq!(
+        signed["payload_hash"].as_str().map(str::len),
+        Some(64),
+        "payload hash is a 32-byte sha256 hex"
     );
 
+    broadcast_signed(&h.worker, &signed).await?;
+
     let after = recipient.view_account().await?.balance;
-    assert!(
-        after.as_yoctonear() > before.as_yoctonear() + NearToken::from_near(1).as_yoctonear(),
-        "recipient should have received the transfer"
+    assert_eq!(
+        after.as_yoctonear() - before.as_yoctonear(),
+        NearToken::from_near(2).as_yoctonear(),
+        "recipient should receive exactly the signed transfer"
     );
 
     let last_signed: Option<u64> = h
@@ -304,31 +372,33 @@ async fn signed_request_executes_through_active_signer() -> Result<()> {
         .json()?;
     assert!(last_signed.unwrap_or(0) > 0, "last_signed_at should update");
 
-    let replay = submit(&h, wallet.id(), &msg, &proof).await?;
+    let replay = submit(&h, wallet.id(), &msg, &proof, tx_nonce + 2, block_hash).await?;
     assert!(replay.is_failure(), "replayed nonce must be rejected");
     Ok(())
 }
 
 #[tokio::test]
-async fn owner_cannot_mutate_extension_set_through_active_signer() -> Result<()> {
+async fn account_carries_only_the_mpc_full_access_key() -> Result<()> {
     let h = setup().await?;
     let owner = user_key(7);
     let wallet = mint_wallet(&h, "alice", &owner).await?;
 
-    let before: Vec<String> = h.registry.view(wallet.id(), "w_extensions").await?.json()?;
-    assert_eq!(before.len(), 2, "wallet mints with exactly two extensions");
-
-    let (msg, proof) = signed_add_extension(wallet.id(), h.admin.id(), 1, &owner);
-    let exec = submit(&h, wallet.id(), &msg, &proof).await?;
+    let keys = wallet.view_access_keys().await?;
     assert!(
-        exec.is_failure(),
-        "owner-signed wallet ops must be rejected at the signer: {exec:#?}"
+        keys.iter().any(|k| k.public_key == ws_pubkey(&mpc_key())),
+        "the MPC-derived key must be a full-access key on the account"
     );
 
-    let after: Vec<String> = h.registry.view(wallet.id(), "w_extensions").await?.json()?;
+    let stored: Option<String> = h
+        .active_signer
+        .view("mpc_key_of")
+        .args_json(json!({ "wallet": wallet.id() }))
+        .await?
+        .json()?;
     assert_eq!(
-        before, after,
-        "the wallet extension set must be unchanged after a rejected ops request"
+        stored.as_deref(),
+        Some(raw_base58(&mpc_key()).as_str()),
+        "active-signer must know the account's MPC key"
     );
     Ok(())
 }
@@ -363,7 +433,7 @@ async fn marketplace_rotation_kills_old_key() -> Result<()> {
         1,
         &owner,
     );
-    let old = submit(&h, wallet.id(), &old_msg, &old_proof).await?;
+    let old = submit_offline(&h, wallet.id(), &old_msg, &old_proof).await?;
     assert!(
         old.is_failure(),
         "old owner key must be dead after rotation"
@@ -376,7 +446,7 @@ async fn marketplace_rotation_kills_old_key() -> Result<()> {
         1,
         &buyer,
     );
-    let new = submit(&h, wallet.id(), &new_msg, &new_proof).await?;
+    let new = submit_offline(&h, wallet.id(), &new_msg, &new_proof).await?;
     assert!(new.is_success(), "new owner key must work: {new:#?}");
     Ok(())
 }
@@ -409,18 +479,29 @@ async fn reclaim_sweeps_ft_to_destination() -> Result<()> {
         .await?
         .into_result()?;
 
-    h.registry
+    let (tx_nonce, block_hash) = mpc_key_state(&h.worker, wallet.id()).await?;
+    let sweep = h
+        .registry
         .call(h.hos_extension.id(), "sweep_ft")
         .args_json(json!({
             "wallet": wallet.id(),
             "ft": token.id(),
             "destination": destination.id(),
+            "tx_nonce": (tx_nonce + 1).to_string(),
+            "block_hash": bs58::encode(block_hash.0).into_string(),
         }))
         .deposit(SWEEP_ATTACHED)
-        .gas(Gas::from_tgas(120))
+        .gas(Gas::from_tgas(160))
         .transact()
-        .await?
-        .into_result()?;
+        .await?;
+    assert!(sweep.is_success(), "sweep_ft failed: {sweep:#?}");
+    let signed: serde_json::Value = sweep.json()?;
+    assert!(
+        !signed.is_null(),
+        "sweep must produce an MPC-signed ft_transfer"
+    );
+
+    broadcast_signed(&h.worker, &signed).await?;
 
     let wallet_bal: near_sdk::json_types::U128 = token
         .view("ft_balance_of")
@@ -731,7 +812,7 @@ async fn recovery_full_lifecycle_swaps_owner() -> Result<()> {
         1,
         &owner,
     );
-    let old = submit(&h, wallet.id(), &msg, &proof).await?;
+    let old = submit_offline(&h, wallet.id(), &msg, &proof).await?;
     assert!(
         old.is_failure(),
         "old owner key must be dead after recovery"
@@ -828,7 +909,7 @@ async fn recovery_freeze_blocks_owner_then_abort_restores() -> Result<()> {
         1,
         &owner,
     );
-    let blocked = submit(&h, wallet.id(), &msg, &proof).await?;
+    let blocked = submit_offline(&h, wallet.id(), &msg, &proof).await?;
     assert!(
         blocked.is_failure(),
         "frozen wallet must reject signed requests"
@@ -849,7 +930,7 @@ async fn recovery_freeze_blocks_owner_then_abort_restores() -> Result<()> {
         2,
         &owner,
     );
-    let restored = submit(&h, wallet.id(), &msg2, &proof2).await?;
+    let restored = submit_offline(&h, wallet.id(), &msg2, &proof2).await?;
     assert!(
         restored.is_success(),
         "wallet must work again after abort unfreezes it"

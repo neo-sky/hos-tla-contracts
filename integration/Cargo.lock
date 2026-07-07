@@ -13,6 +13,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "active-signer"
+version = "0.1.0"
+dependencies = [
+ "defuse-deadline",
+ "defuse-wallet",
+ "hos-common",
+ "near-sdk",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -551,6 +561,7 @@ source = "git+https://github.com/near/intents?rev=980c19e8b2d6ca864e01a3c2b5a9a1
 dependencies = [
  "chrono",
  "defuse-borsh-utils",
+ "defuse-near-utils",
  "serde",
 ]
 
@@ -574,6 +585,17 @@ version = "0.1.0"
 source = "git+https://github.com/near/intents?rev=980c19e8b2d6ca864e01a3c2b5a9a12dd1d19683#980c19e8b2d6ca864e01a3c2b5a9a12dd1d19683"
 dependencies = [
  "impl-tools",
+]
+
+[[package]]
+name = "defuse-near-utils"
+version = "0.1.0"
+source = "git+https://github.com/near/intents?rev=980c19e8b2d6ca864e01a3c2b5a9a12dd1d19683#980c19e8b2d6ca864e01a3c2b5a9a12dd1d19683"
+dependencies = [
+ "chrono",
+ "defuse-borsh-utils",
+ "impl-tools",
+ "near-sdk",
 ]
 
 [[package]]
@@ -1067,13 +1089,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "hos-common"
+version = "0.1.0"
+dependencies = [
+ "near-sdk",
+]
+
+[[package]]
 name = "hos-tla-integration"
 version = "0.1.0"
 dependencies = [
+ "active-signer",
  "anyhow",
  "bs58 0.5.1",
  "defuse-wallet",
  "defuse-wallet-sdk",
+ "hos-common",
  "near-crypto 0.34.7",
  "near-jsonrpc-client",
  "near-jsonrpc-primitives",

@@ -5,10 +5,10 @@ members = [
     "contracts/mpc-recovery",
     "contracts/active-signer",
     "contracts/hos-extension",
-    "contracts/hos-wallet",
     "contracts/tla-manager",
     "contracts/tla-registry",
     "dev-contracts/test-ft",
+    "dev-contracts/test-mpc",
 ]
 exclude = ["integration"]
 

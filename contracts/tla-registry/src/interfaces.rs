@@ -1,10 +1,17 @@
-use near_sdk::json_types::U128;
+use near_sdk::json_types::{Base58CryptoHash, U128, U64};
 use near_sdk::{ext_contract, AccountId, PublicKey};
 
 #[allow(dead_code)]
 #[ext_contract(ext_hos_extension)]
 pub trait HosExtension {
-    fn sweep_ft(&mut self, wallet: AccountId, ft: AccountId, destination: AccountId);
+    fn sweep_ft(
+        &mut self,
+        wallet: AccountId,
+        ft: AccountId,
+        destination: AccountId,
+        tx_nonce: U64,
+        block_hash: Base58CryptoHash,
+    );
     fn force_transfer(
         &mut self,
         wallet: AccountId,

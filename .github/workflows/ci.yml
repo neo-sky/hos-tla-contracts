@@ -30,7 +30,7 @@ jobs:
         run: >
           cargo fmt --check
           -p hos-common -p active-signer -p hos-extension -p mpc-recovery
-          -p tla-manager -p tla-registry -p test-ft
+          -p tla-manager -p tla-registry -p test-ft -p test-mpc
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -58,7 +58,6 @@ jobs:
           for crate in active-signer hos-extension mpc-recovery tla-manager tla-registry; do
             (cd "contracts/$crate" && cargo near build non-reproducible-wasm --no-abi)
           done
-          (cd contracts/hos-wallet && cargo near build non-reproducible-wasm --locked --no-default-features --features=contract --no-abi)
 
   integration:
     runs-on: ubuntu-latest
@@ -77,10 +76,9 @@ jobs:
 
       - name: Build contracts
         run: |
-          for crate in active-signer hos-extension mpc-recovery tla-manager tla-registry test-ft; do
+          for crate in active-signer hos-extension mpc-recovery tla-manager tla-registry test-ft test-mpc; do
             (cd "$(find contracts dev-contracts -maxdepth 1 -name "$crate" -type d | head -1)" && cargo near build non-reproducible-wasm --no-abi)
           done
-          (cd contracts/hos-wallet && cargo near build non-reproducible-wasm --locked --no-default-features --features=contract --no-abi)
 
       - name: Integration tests
         run: cargo test --manifest-path integration/Cargo.toml
@@ -94,8 +92,8 @@ jobs:
       - name: Install cargo-audit
         run: cargo +stable install cargo-audit --locked
       - name: RustSec advisory scan
-        # Three advisories appear in the dependency tree and are triaged here; none is
-        # reachable in the deployed contract wasm.
+        # Three failing advisories are ignored here; none is reachable in the deployed
+        # contract wasm. RustSec warnings still print for visibility.
         #   RUSTSEC-2026-0009 (time < 0.3.47, DoS via stack exhaustion): a host-side
         #     near-o11y/tracing-appender transitive, absent from the wasm. Its fix needs
         #     Rust 1.88, incompatible with the 1.86 pin the nearcore VM mandates.
@@ -103,5 +101,7 @@ jobs:
         #     helper pulled by impl-tools, compiled away before runtime.
         #   RUSTSEC-2022-0054 (wee_alloc unmaintained): not the contract allocator
         #     (near-sdk 5.x uses the default system allocator); not linked into the wasm.
+        #   RUSTSEC-2026-0190 (anyhow downcast_mut unsoundness): warning-only via the
+        #     host near-vm-runner/wasmtime tree; absent from deployed wasm behavior.
         # Risk accepted and tracked here.
         run: cargo +stable audit --ignore RUSTSEC-2026-0009 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2022-0054

@@ -5,11 +5,12 @@ use crate::interfaces::{ext_hos_extension, ext_tla_manager};
 use crate::mother::effective_sub_lifecycle;
 use crate::types::*;
 use crate::{TlaRegistry, TlaRegistryExt};
+use near_sdk::json_types::{Base58CryptoHash, U64};
 use near_sdk::{env, is_promise_success, near, AccountId, Gas, NearToken, Promise, PromiseOrValue};
 
 const GAS_FOR_HOS_SWEEP: Gas = Gas::from_tgas(120);
 const GAS_FOR_HOS_FORCE_TRANSFER: Gas = Gas::from_tgas(45);
-const GAS_FOR_RETRY_INSTALL: Gas = Gas::from_tgas(20);
+const GAS_FOR_RETRY_INSTALL: Gas = Gas::from_tgas(30);
 const GAS_FOR_FINALIZE_CB: Gas = Gas::from_tgas(10);
 const GAS_FOR_BALANCES_CB_TOTAL: Gas = Gas::from_tgas(80);
 
@@ -25,6 +26,8 @@ impl TlaRegistry {
         tla_id: AccountId,
         name: String,
         ft: AccountId,
+        tx_nonce: U64,
+        block_hash: Base58CryptoHash,
     ) -> Result<Promise, ContractError> {
         self.assert_not_paused()?;
         validate_name(&name)?;
@@ -47,7 +50,7 @@ impl TlaRegistry {
         Ok(ext_hos_extension::ext(self.hos_extension.clone())
             .with_static_gas(GAS_FOR_HOS_SWEEP)
             .with_attached_deposit(SWEEP_ATTACHED_REQUIRED)
-            .sweep_ft(sub_account, ft, destination))
+            .sweep_ft(sub_account, ft, destination, tx_nonce, block_hash))
     }
 
     #[handle_result]

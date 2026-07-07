@@ -1,17 +1,20 @@
 mod error;
 mod events;
 
-use near_sdk::json_types::Base58CryptoHash;
 use near_sdk::serde_json::json;
 use near_sdk::{
-    env, ext_contract, near, require, AccountId, CryptoHash, Gas, NearToken, PanicOnDefault,
-    Promise, PromiseError, PromiseOrValue, PublicKey,
+    env, ext_contract, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise,
+    PromiseError, PromiseOrValue, PublicKey,
 };
 
 use crate::events::Event;
+use hos_common::tx::mpc_path;
 use hos_common::MintOutcome;
 
-const WALLET_INIT_GAS: Gas = Gas::from_tgas(30);
+const ED25519_DOMAIN: u64 = 1;
+const DERIVE_KEY_GAS: Gas = Gas::from_tgas(10);
+const ON_KEY_DERIVED_GAS: Gas = Gas::from_tgas(75);
+const ON_RETRY_KEY_DERIVED_GAS: Gas = Gas::from_tgas(15);
 const INSTALL_SIGNER_GAS: Gas = Gas::from_tgas(10);
 const CALLBACK_GAS: Gas = Gas::from_tgas(20);
 const ON_CREATED_GAS: Gas = Gas::from_tgas(50);
@@ -19,7 +22,7 @@ const ON_CREATED_GAS: Gas = Gas::from_tgas(50);
 #[ext_contract(ext_active_signer)]
 #[allow(dead_code)]
 trait ActiveSigner {
-    fn install_signer(&mut self, wallet: AccountId, public_key: String);
+    fn install_signer(&mut self, wallet: AccountId, public_key: String, mpc_public_key: PublicKey);
 }
 
 #[near(contract_state)]
@@ -27,8 +30,7 @@ trait ActiveSigner {
 pub struct TlaManager {
     registry: AccountId,
     active_signer: AccountId,
-    hos_extension: AccountId,
-    wallet_code_hash: CryptoHash,
+    mpc_signer: AccountId,
     min_balance: NearToken,
 }
 
@@ -38,15 +40,13 @@ impl TlaManager {
     pub fn new(
         registry: AccountId,
         active_signer: AccountId,
-        hos_extension: AccountId,
-        wallet_code_hash: Base58CryptoHash,
+        mpc_signer: AccountId,
         min_balance: NearToken,
     ) -> Self {
         Self {
             registry,
             active_signer,
-            hos_extension,
-            wallet_code_hash: wallet_code_hash.into(),
+            mpc_signer,
             min_balance,
         }
     }
@@ -68,24 +68,43 @@ impl TlaManager {
         let account: AccountId = format!("{}.{}", name, env::current_account_id())
             .parse()
             .unwrap_or_else(|_| env::panic_str(error::INVALID_NAME));
-        let extensions = [self.active_signer.clone(), self.hos_extension.clone()];
-        let init_args = json!({ "extensions": extensions }).to_string().into_bytes();
 
-        Promise::new(account.clone())
-            .create_account()
-            .transfer(funding)
-            .use_global_contract(self.wallet_code_hash)
-            .function_call(
-                "new".to_string(),
-                init_args,
-                NearToken::ZERO,
-                WALLET_INIT_GAS,
-            )
-            .then(
-                Self::ext(env::current_account_id())
-                    .with_static_gas(ON_CREATED_GAS)
-                    .on_wallet_created(account, owner_public_key, funding),
-            )
+        self.derive_key(&account).then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(ON_KEY_DERIVED_GAS)
+                .on_key_derived(account, owner_public_key, funding),
+        )
+    }
+
+    #[private]
+    pub fn on_key_derived(
+        &mut self,
+        account: AccountId,
+        owner_public_key: PublicKey,
+        funding: NearToken,
+        #[callback_result] derived: Result<PublicKey, PromiseError>,
+    ) -> PromiseOrValue<MintOutcome> {
+        let mpc_public_key = match derived {
+            Ok(key) if hos_common::is_ed25519(&key) => key,
+            _ => {
+                Event::MintFailed {
+                    account: account.clone(),
+                }
+                .emit();
+                return self.refund_and_fail(funding);
+            }
+        };
+        PromiseOrValue::Promise(
+            Promise::new(account.clone())
+                .create_account()
+                .transfer(funding)
+                .add_full_access_key(mpc_public_key.clone())
+                .then(
+                    Self::ext(env::current_account_id())
+                        .with_static_gas(ON_CREATED_GAS)
+                        .on_wallet_created(account, owner_public_key, mpc_public_key, funding),
+                ),
+        )
     }
 
     #[private]
@@ -93,6 +112,7 @@ impl TlaManager {
         &mut self,
         account: AccountId,
         owner_public_key: PublicKey,
+        mpc_public_key: PublicKey,
         funding: NearToken,
         #[callback_result] result: Result<(), PromiseError>,
     ) -> PromiseOrValue<MintOutcome> {
@@ -101,13 +121,7 @@ impl TlaManager {
                 account: account.clone(),
             }
             .emit();
-            return PromiseOrValue::Promise(
-                Promise::new(self.registry.clone()).transfer(funding).then(
-                    Self::ext(env::current_account_id())
-                        .with_static_gas(CALLBACK_GAS)
-                        .on_creation_failed(),
-                ),
-            );
+            return self.refund_and_fail(funding);
         }
         Event::SubAccountMinted {
             account: account.clone(),
@@ -120,6 +134,7 @@ impl TlaManager {
                 .install_signer(
                     account.clone(),
                     hos_common::ed25519_base58_or_panic(&owner_public_key),
+                    mpc_public_key,
                 )
                 .then(
                     Self::ext(env::current_account_id())
@@ -157,11 +172,30 @@ impl TlaManager {
             hos_common::is_ed25519(&owner_public_key),
             hos_common::NOT_ED25519
         );
+        self.derive_key(&account).then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(ON_RETRY_KEY_DERIVED_GAS)
+                .on_retry_key_derived(account, owner_public_key),
+        )
+    }
+
+    #[private]
+    pub fn on_retry_key_derived(
+        &mut self,
+        account: AccountId,
+        owner_public_key: PublicKey,
+        #[callback_result] derived: Result<PublicKey, PromiseError>,
+    ) -> Promise {
+        let mpc_public_key = match derived {
+            Ok(key) if hos_common::is_ed25519(&key) => key,
+            _ => env::panic_str(error::DERIVE_FAILED),
+        };
         ext_active_signer::ext(self.active_signer.clone())
             .with_static_gas(INSTALL_SIGNER_GAS)
             .install_signer(
                 account,
                 hos_common::ed25519_base58_or_panic(&owner_public_key),
+                mpc_public_key,
             )
     }
 
@@ -173,12 +207,39 @@ impl TlaManager {
         self.min_balance
     }
 
-    pub fn config(&self) -> (AccountId, AccountId, Base58CryptoHash, NearToken) {
+    pub fn config(&self) -> (AccountId, AccountId, NearToken) {
         (
             self.active_signer.clone(),
-            self.hos_extension.clone(),
-            Base58CryptoHash::from(self.wallet_code_hash),
+            self.mpc_signer.clone(),
             self.min_balance,
+        )
+    }
+}
+
+impl TlaManager {
+    fn derive_key(&self, account: &AccountId) -> Promise {
+        let args = json!({
+            "path": mpc_path(account),
+            "predecessor": self.active_signer,
+            "domain_id": ED25519_DOMAIN,
+        })
+        .to_string()
+        .into_bytes();
+        Promise::new(self.mpc_signer.clone()).function_call(
+            "derived_public_key".to_string(),
+            args,
+            NearToken::ZERO,
+            DERIVE_KEY_GAS,
+        )
+    }
+
+    fn refund_and_fail(&self, funding: NearToken) -> PromiseOrValue<MintOutcome> {
+        PromiseOrValue::Promise(
+            Promise::new(self.registry.clone()).transfer(funding).then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(CALLBACK_GAS)
+                    .on_creation_failed(),
+            ),
         )
     }
 }
@@ -192,9 +253,10 @@ mod tests {
 
     const REGISTRY: &str = "tla-registry.testnet";
     const SIGNER: &str = "active-signer.testnet";
-    const HOSEXT: &str = "hos-extension.testnet";
+    const MPC: &str = "v1.signer.testnet";
     const MANAGER: &str = "tla.testnet";
     const OWNER_KEY: &str = "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847";
+    const MPC_KEY: &str = "ed25519:DZdWKDt29SBdPqeyfykg8TFF5Zkb5Qzdd6FJiJMvftZG";
 
     fn acc(s: &str) -> AccountId {
         AccountId::from_str(s).unwrap()
@@ -204,8 +266,15 @@ mod tests {
         PublicKey::from_str(OWNER_KEY).unwrap()
     }
 
-    fn hash() -> Base58CryptoHash {
-        Base58CryptoHash::from([7u8; 32])
+    fn derived_key() -> PublicKey {
+        PublicKey::from_str(MPC_KEY).unwrap()
+    }
+
+    fn secp_key() -> PublicKey {
+        PublicKey::from_str(
+            "secp256k1:qMoRgcoXai4mBPsdbHi1wfyxF9TdbPCF4qSDQTRP3TfescSRoUdSx6nmeQoN3aiwGzwMyGXAb1gUjBTv5AY8DXj",
+        )
+        .unwrap()
     }
 
     fn ctx(predecessor: &str, deposit: u128) {
@@ -221,8 +290,7 @@ mod tests {
         TlaManager::new(
             acc(REGISTRY),
             acc(SIGNER),
-            acc(HOSEXT),
-            hash(),
+            acc(MPC),
             NearToken::from_millinear(100),
         )
     }
@@ -271,12 +339,52 @@ mod tests {
     }
 
     #[test]
+    fn derive_success_creates_account() {
+        let mut c = deploy();
+        ctx(MANAGER, 0);
+        let out = c.on_key_derived(
+            acc("alice.tla.testnet"),
+            owner_key(),
+            NearToken::from_millinear(100),
+            Ok(derived_key()),
+        );
+        assert!(matches!(out, PromiseOrValue::Promise(_)));
+    }
+
+    #[test]
+    fn derive_failure_refunds_registry() {
+        let mut c = deploy();
+        ctx(MANAGER, 0);
+        let out = c.on_key_derived(
+            acc("alice.tla.testnet"),
+            owner_key(),
+            NearToken::from_millinear(100),
+            Err(PromiseError::Failed),
+        );
+        assert!(matches!(out, PromiseOrValue::Promise(_)));
+    }
+
+    #[test]
+    fn secp256k1_derived_key_treated_as_failure() {
+        let mut c = deploy();
+        ctx(MANAGER, 0);
+        let out = c.on_key_derived(
+            acc("alice.tla.testnet"),
+            owner_key(),
+            NearToken::from_millinear(100),
+            Ok(secp_key()),
+        );
+        assert!(matches!(out, PromiseOrValue::Promise(_)));
+    }
+
+    #[test]
     fn callback_success_installs_signer() {
         let mut c = deploy();
         ctx(MANAGER, 0);
         let _ = c.on_wallet_created(
             acc("alice.tla.testnet"),
             owner_key(),
+            derived_key(),
             NearToken::from_millinear(100),
             Ok(()),
         );
@@ -289,6 +397,7 @@ mod tests {
         let out = c.on_wallet_created(
             acc("alice.tla.testnet"),
             owner_key(),
+            derived_key(),
             NearToken::from_millinear(100),
             Err(PromiseError::Failed),
         );
@@ -310,20 +419,15 @@ mod tests {
     fn secp256k1_owner_key_rejected() {
         let mut c = deploy();
         ctx(REGISTRY, min());
-        let secp = PublicKey::from_str(
-            "secp256k1:qMoRgcoXai4mBPsdbHi1wfyxF9TdbPCF4qSDQTRP3TfescSRoUdSx6nmeQoN3aiwGzwMyGXAb1gUjBTv5AY8DXj",
-        )
-        .unwrap();
-        let _ = c.create_sub_account("alice".to_string(), secp);
+        let _ = c.create_sub_account("alice".to_string(), secp_key());
     }
 
     #[test]
     fn config_roundtrips() {
         let c = deploy();
-        let (signer, hosext, code, bal) = c.config();
+        let (signer, mpc, bal) = c.config();
         assert_eq!(signer, acc(SIGNER));
-        assert_eq!(hosext, acc(HOSEXT));
-        assert_eq!(code, hash());
+        assert_eq!(mpc, acc(MPC));
         assert_eq!(bal, NearToken::from_millinear(100));
     }
 
@@ -356,5 +460,24 @@ mod tests {
         let mut c = deploy();
         ctx("attacker.testnet", 0);
         let _ = c.retry_install(acc("alice.tla.testnet"), owner_key());
+    }
+
+    #[test]
+    fn retry_derive_success_chains_install() {
+        let mut c = deploy();
+        ctx(MANAGER, 0);
+        let _ = c.on_retry_key_derived(acc("alice.tla.testnet"), owner_key(), Ok(derived_key()));
+    }
+
+    #[test]
+    #[should_panic(expected = "mpc key derivation failed")]
+    fn retry_derive_failure_panics() {
+        let mut c = deploy();
+        ctx(MANAGER, 0);
+        let _ = c.on_retry_key_derived(
+            acc("alice.tla.testnet"),
+            owner_key(),
+            Err(PromiseError::Failed),
+        );
     }
 }

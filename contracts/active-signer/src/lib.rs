@@ -1,54 +1,82 @@
 mod error;
 mod events;
+mod nep413;
 mod state;
 
 use core::marker::PhantomData;
 use std::str::FromStr;
 use std::time::Duration;
 
-use defuse_wallet::ext_wallet;
 use defuse_wallet::signature::ed25519::{Ed25519, Ed25519PublicKey};
-use defuse_wallet::signature::{
-    Borsh, Deadline, DomainPrefix, RequestMessage, Sha256, SigningStandard,
-};
+use defuse_wallet::signature::{Borsh, Deadline, Sha256, SigningStandard};
 use defuse_wallet::Nonces;
+use hos_common::tx::{build_transaction, mpc_path, to_hex, TxAction};
 use near_sdk::borsh::BorshSerialize;
+use near_sdk::json_types::{Base58CryptoHash, Base64VecU8, U64};
+use near_sdk::serde_json::{json, Value};
 use near_sdk::store::{IterableSet, LookupMap};
-use near_sdk::{env, near, require, AccountId, BorshStorageKey, Gas, PanicOnDefault, Promise};
+use near_sdk::{
+    env, near, require, AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise,
+    PromiseError, PublicKey,
+};
 
 use crate::events::Event;
 use crate::state::{FreezeState, SignerEntry};
 
-type Pipeline = Borsh<DomainPrefix<Sha256<Ed25519>>>;
-type FreezePipeline = Borsh<FreezeDomainPrefix<Sha256<Ed25519>>>;
-
-const CHAIN_ID: &str = "mainnet";
+pub const CHAIN_ID: &str = "mainnet";
 const MIN_TIMEOUT_SECS: u32 = 60;
 const MAX_TIMEOUT_SECS: u32 = 2_592_000;
-const WALLET_GAS: Gas = Gas::from_tgas(50);
+const SIGN_GAS: Gas = Gas::from_tgas(60);
+const ON_SIGNED_GAS: Gas = Gas::from_tgas(10);
+const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
+const ED25519_DOMAIN: u64 = 1;
 const BY_MARKETPLACE: &str = "marketplace";
 const BY_RECOVERY: &str = "recovery";
-const FREEZE_DOMAIN: &[u8] = b"NEAR_HOS_ACTIVE_SIGNER_FREEZE/V1";
+pub const FREEZE_DOMAIN: &[u8] = b"NEAR_HOS_ACTIVE_SIGNER_FREEZE/V1";
+pub const TX_DOMAIN: &[u8] = b"NEAR_HOS_ACTIVE_SIGNER_TX/V1";
+pub const MESSAGE_DOMAIN: &[u8] = b"NEAR_HOS_ACTIVE_SIGNER_MSG/V1";
 
-struct FreezeDomainPrefix<S>(PhantomData<S>)
+trait DomainTag {
+    const DOMAIN: &'static [u8];
+}
+
+struct FreezeTag;
+struct TxTag;
+struct MessageTag;
+
+impl DomainTag for FreezeTag {
+    const DOMAIN: &'static [u8] = FREEZE_DOMAIN;
+}
+
+impl DomainTag for TxTag {
+    const DOMAIN: &'static [u8] = TX_DOMAIN;
+}
+
+impl DomainTag for MessageTag {
+    const DOMAIN: &'static [u8] = MESSAGE_DOMAIN;
+}
+
+struct TaggedDomain<T, S>(PhantomData<(T, S)>)
 where
+    T: DomainTag,
     S: SigningStandard<Vec<u8>> + ?Sized;
 
-impl<M, S> SigningStandard<M> for FreezeDomainPrefix<S>
+impl<T, M, S> SigningStandard<M> for TaggedDomain<T, S>
 where
+    T: DomainTag,
     S: SigningStandard<Vec<u8>> + ?Sized,
     M: AsRef<[u8]>,
 {
     type PublicKey = S::PublicKey;
 
     fn verify(msg: M, public_key: &Self::PublicKey, signature: &str) -> bool {
-        S::verify(
-            [FREEZE_DOMAIN, msg.as_ref()].concat(),
-            public_key,
-            signature,
-        )
+        S::verify([T::DOMAIN, msg.as_ref()].concat(), public_key, signature)
     }
 }
+
+type FreezePipeline = Borsh<TaggedDomain<FreezeTag, Sha256<Ed25519>>>;
+type TxPipeline = Borsh<TaggedDomain<TxTag, Sha256<Ed25519>>>;
+type MessagePipeline = Borsh<TaggedDomain<MessageTag, Sha256<Ed25519>>>;
 
 #[near(serializers = [borsh, json])]
 #[derive(Clone)]
@@ -58,6 +86,39 @@ pub struct FreezeMessage {
     pub nonce: u32,
     pub created_at_secs: u32,
     pub timeout_secs: u32,
+}
+
+#[near(serializers = [borsh, json])]
+#[derive(Clone)]
+pub struct TxMessage {
+    pub chain_id: String,
+    pub signer_id: AccountId,
+    pub nonce: u32,
+    pub created_at_secs: u32,
+    pub timeout_secs: u32,
+    pub receiver_id: AccountId,
+    pub actions: Vec<TxAction>,
+}
+
+#[near(serializers = [borsh, json])]
+#[derive(Clone)]
+pub struct MessageRequest {
+    pub chain_id: String,
+    pub signer_id: AccountId,
+    pub nonce: u32,
+    pub created_at_secs: u32,
+    pub timeout_secs: u32,
+    pub message: String,
+    pub recipient: String,
+    pub message_nonce: Base64VecU8,
+    pub callback_url: Option<String>,
+}
+
+#[near(serializers = [json])]
+pub struct MpcSigned {
+    pub payload_hash: String,
+    pub unsigned_tx_hex: Option<String>,
+    pub mpc_signature: Value,
 }
 
 #[derive(BorshSerialize, BorshStorageKey)]
@@ -75,6 +136,7 @@ pub struct ActiveSigner {
     minters: IterableSet<AccountId>,
     marketplace_authority: AccountId,
     recovery_authority: AccountId,
+    mpc_signer: AccountId,
     timeout_secs: u32,
     signers: LookupMap<AccountId, SignerEntry>,
 }
@@ -86,6 +148,7 @@ impl ActiveSigner {
         admin: AccountId,
         marketplace_authority: AccountId,
         recovery_authority: AccountId,
+        mpc_signer: AccountId,
         timeout_secs: u32,
     ) -> Self {
         require!(
@@ -99,6 +162,7 @@ impl ActiveSigner {
             minters: IterableSet::new(StorageKey::Minters),
             marketplace_authority,
             recovery_authority,
+            mpc_signer,
             timeout_secs,
             signers: LookupMap::new(StorageKey::Signers),
         }
@@ -133,19 +197,29 @@ impl ActiveSigner {
         }
     }
 
-    pub fn install_signer(&mut self, wallet: AccountId, public_key: String) {
+    pub fn install_signer(
+        &mut self,
+        wallet: AccountId,
+        public_key: String,
+        mpc_public_key: PublicKey,
+    ) {
         self.assert_minter();
         require!(
             is_direct_subaccount(&wallet, &env::predecessor_account_id()),
             error::WALLET_NOT_UNDER_MINTER
         );
         require!(self.signers.get(&wallet).is_none(), error::SIGNER_EXISTS);
+        require!(
+            hos_common::is_ed25519(&mpc_public_key),
+            error::MPC_NOT_ED25519
+        );
         let public_key = parse_key(&public_key);
         let timeout = Duration::from_secs(self.timeout_secs.into());
         self.signers.insert(
             wallet.clone(),
             SignerEntry {
                 public_key,
+                mpc_public_key,
                 nonces: Nonces::new(timeout),
                 freeze_nonces: Nonces::new(timeout),
                 last_signed_at: 0,
@@ -156,40 +230,135 @@ impl ActiveSigner {
     }
 
     #[payable]
-    pub fn submit_signed_request(
+    pub fn submit_signed_tx(
         &mut self,
         wallet: AccountId,
-        msg: RequestMessage,
+        msg: TxMessage,
         proof: String,
+        tx_nonce: U64,
+        block_hash: Base58CryptoHash,
     ) -> Promise {
-        require!(!env::attached_deposit().is_zero(), error::DEPOSIT_REQUIRED);
+        require!(
+            env::attached_deposit() == ONE_YOCTO,
+            error::ONE_YOCTO_REQUIRED
+        );
         require!(msg.chain_id == CHAIN_ID, error::WRONG_CHAIN);
         require!(msg.signer_id == wallet, error::SIGNER_MISMATCH);
-        require!(msg.request.ops.is_empty(), error::OPS_NOT_ALLOWED);
-        let deposit = env::attached_deposit();
+        require!(!msg.actions.is_empty(), error::NO_ACTIONS);
+        let mpc_public_key = self.authorize(
+            &wallet,
+            msg.nonce,
+            msg.created_at_secs,
+            msg.timeout_secs,
+            |key| TxPipeline::verify(&msg, key, &proof),
+        );
+        let unsigned = build_transaction(
+            &wallet,
+            &mpc_public_key,
+            tx_nonce.0,
+            &msg.receiver_id,
+            &block_hash.into(),
+            &msg.actions,
+        );
+        Event::TxSigned {
+            wallet: wallet.clone(),
+            nonce: msg.nonce,
+        }
+        .emit();
+        self.sign_payload(&wallet, &env::sha256(&unsigned), Some(to_hex(&unsigned)))
+    }
+
+    #[payable]
+    pub fn submit_signed_message(
+        &mut self,
+        wallet: AccountId,
+        msg: MessageRequest,
+        proof: String,
+    ) -> Promise {
+        require!(
+            env::attached_deposit() == ONE_YOCTO,
+            error::ONE_YOCTO_REQUIRED
+        );
+        require!(msg.chain_id == CHAIN_ID, error::WRONG_CHAIN);
+        require!(msg.signer_id == wallet, error::SIGNER_MISMATCH);
+        let message_nonce = <[u8; 32]>::try_from(msg.message_nonce.0.as_slice())
+            .unwrap_or_else(|_| env::panic_str(error::BAD_MESSAGE_NONCE));
+        self.authorize(
+            &wallet,
+            msg.nonce,
+            msg.created_at_secs,
+            msg.timeout_secs,
+            |key| MessagePipeline::verify(&msg, key, &proof),
+        );
+        let payload = nep413::payload(
+            &msg.message,
+            &message_nonce,
+            &msg.recipient,
+            msg.callback_url.as_deref(),
+        );
+        Event::MessageSigned {
+            wallet: wallet.clone(),
+            nonce: msg.nonce,
+        }
+        .emit();
+        self.sign_payload(&wallet, &env::sha256(&payload), None)
+    }
+
+    #[payable]
+    pub fn authority_sign_tx(
+        &mut self,
+        wallet: AccountId,
+        receiver_id: AccountId,
+        actions: Vec<TxAction>,
+        tx_nonce: U64,
+        block_hash: Base58CryptoHash,
+    ) -> Promise {
+        require!(
+            env::attached_deposit() == ONE_YOCTO,
+            error::ONE_YOCTO_REQUIRED
+        );
+        require!(
+            env::predecessor_account_id() == self.marketplace_authority,
+            error::ONLY_MARKETPLACE
+        );
+        require!(!actions.is_empty(), error::NO_ACTIONS);
         let entry = self
             .signers
             .get_mut(&wallet)
             .unwrap_or_else(|| env::panic_str(error::NO_SIGNER));
         require!(entry.frozen == FreezeState::Unfrozen, error::FROZEN);
-        require!(
-            Pipeline::verify(&msg, &entry.public_key, &proof),
-            error::BAD_SIGNATURE
-        );
-        entry
-            .nonces
-            .commit(msg.nonce, msg.created_at, msg.timeout)
-            .unwrap_or_else(|_| env::panic_str(error::NONCE_REJECTED));
         entry.last_signed_at = env::block_timestamp();
-        Event::RequestExecuted {
+        let mpc_public_key = entry.mpc_public_key.clone();
+        let unsigned = build_transaction(
+            &wallet,
+            &mpc_public_key,
+            tx_nonce.0,
+            &receiver_id,
+            &block_hash.into(),
+            &actions,
+        );
+        Event::AuthorityTxSigned {
             wallet: wallet.clone(),
-            nonce: msg.nonce,
         }
         .emit();
-        ext_wallet::ext(wallet)
-            .with_attached_deposit(deposit)
-            .with_static_gas(WALLET_GAS)
-            .w_execute_extension(msg.request)
+        self.sign_payload(&wallet, &env::sha256(&unsigned), Some(to_hex(&unsigned)))
+    }
+
+    #[private]
+    pub fn on_signed(
+        &self,
+        payload_hash: String,
+        unsigned_tx_hex: Option<String>,
+        #[callback_result] mpc_signature: Result<Value, PromiseError>,
+    ) -> Option<MpcSigned> {
+        match mpc_signature {
+            Ok(mpc_signature) => Some(MpcSigned {
+                payload_hash,
+                unsigned_tx_hex,
+                mpc_signature,
+            }),
+            Err(_) => None,
+        }
     }
 
     pub fn swap_owner(
@@ -302,6 +471,10 @@ impl ActiveSigner {
         self.signers.get(&wallet).map(|e| e.public_key.to_string())
     }
 
+    pub fn mpc_key_of(&self, wallet: AccountId) -> Option<PublicKey> {
+        self.signers.get(&wallet).map(|e| e.mpc_public_key.clone())
+    }
+
     pub fn last_signed_at(&self, wallet: AccountId) -> Option<u64> {
         self.signers.get(&wallet).map(|e| e.last_signed_at)
     }
@@ -314,6 +487,10 @@ impl ActiveSigner {
 
     pub fn freeze_state(&self, wallet: AccountId) -> Option<FreezeState> {
         self.signers.get(&wallet).map(|e| e.frozen)
+    }
+
+    pub fn mpc_signer(&self) -> AccountId {
+        self.mpc_signer.clone()
     }
 
     pub fn is_minter(&self, account: AccountId) -> bool {
@@ -346,6 +523,55 @@ impl ActiveSigner {
             self.minters.contains(&env::predecessor_account_id()),
             error::ONLY_MINTER
         );
+    }
+
+    fn authorize(
+        &mut self,
+        wallet: &AccountId,
+        nonce: u32,
+        created_at_secs: u32,
+        timeout_secs: u32,
+        verify: impl FnOnce(&Ed25519PublicKey) -> bool,
+    ) -> PublicKey {
+        let entry = self
+            .signers
+            .get_mut(wallet)
+            .unwrap_or_else(|| env::panic_str(error::NO_SIGNER));
+        require!(entry.frozen == FreezeState::Unfrozen, error::FROZEN);
+        require!(verify(&entry.public_key), error::BAD_SIGNATURE);
+        let created_at = Deadline::UNIX_EPOCH + Duration::from_secs(created_at_secs.into());
+        let timeout = Duration::from_secs(timeout_secs.into());
+        entry
+            .nonces
+            .commit(nonce, created_at, timeout)
+            .unwrap_or_else(|_| env::panic_str(error::NONCE_REJECTED));
+        entry.last_signed_at = env::block_timestamp();
+        entry.mpc_public_key.clone()
+    }
+
+    fn sign_payload(
+        &self,
+        wallet: &AccountId,
+        payload: &[u8],
+        unsigned_tx_hex: Option<String>,
+    ) -> Promise {
+        let payload_hash = to_hex(payload);
+        let args = json!({
+            "request": {
+                "path": mpc_path(wallet),
+                "payload_v2": { "Eddsa": payload_hash },
+                "domain_id": ED25519_DOMAIN,
+            }
+        })
+        .to_string()
+        .into_bytes();
+        Promise::new(self.mpc_signer.clone())
+            .function_call("sign".to_string(), args, ONE_YOCTO, SIGN_GAS)
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(ON_SIGNED_GAS)
+                    .on_signed(payload_hash, unsigned_tx_hex),
+            )
     }
 }
 

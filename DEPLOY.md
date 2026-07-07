@@ -6,16 +6,15 @@ names and `v1.signer-prod.testnet` in place of `v1.signer`.
 
 One thing to understand before you start: the wiring between contracts is fixed at
 init and has no setter. `active-signer` bakes in its marketplace and recovery
-authorities, `hos-extension` bakes in its registry, active-signer, and recovery
-references, `mpc-recovery` bakes in its owner, signer, and transfer authority,
-`tla-manager` bakes in all of its references, and `tla-registry` bakes in its
-`hos-extension` and `active-signer`. Because every account name is chosen up front
-this is fine, but it means a wrong address cannot be patched later without
-redeploying. Get the names right first.
+authorities and its MPC signer, `hos-extension` bakes in its registry,
+active-signer, and recovery references, `mpc-recovery` bakes in its owner, signer,
+and transfer authority, `tla-manager` bakes in all of its references, and
+`tla-registry` bakes in its `hos-extension` and `active-signer`. Because every
+account name is chosen up front this is fine, but it means a wrong address cannot
+be patched later without redeploying. Get the names right first.
 
 The contract state schema is versioned at v1 and this suite is a fresh deploy: there
-is no prior on-chain state to migrate from. Each `migrate` method only performs a
-logic-only version bump and assumes the stored Borsh layout still deserializes, so a
+is no prior on-chain state to migrate from, and no `migrate` methods ship in v1. A
 future release that changes a state struct must ship a dedicated
 `#[init(ignore_state)]` migration that reads the old layout and writes the new one.
 Do not alter a contract's state layout without one.
@@ -28,9 +27,9 @@ at init, so all of them need to be known.
 | Account | Contract | Role |
 |---|---|---|
 | `<registry>` | tla-registry | marketplace orchestrator |
-| `<active-signer>` | active-signer | per-wallet signing authority |
+| `<active-signer>` | active-signer | per-account signing authority |
 | `<hos-extension>` | hos-extension | marketplace authority |
-| `<mpc-recovery>` | mpc-recovery | recovery (opt-in per wallet) |
+| `<mpc-recovery>` | mpc-recovery | recovery (opt-in per account) |
 | `<council>` | SputnikDAO | the admin multisig |
 
 Each TLA is its own account (for example `acme.near`) running `tla-manager`.
@@ -47,9 +46,13 @@ runs in a pinned container; the command and image for each crate are in its
 Record the `sha256` of each output wasm. Those hashes are what the auditor and
 anyone verifying the deploy will compare against the on-chain code.
 
-Deploy `hos-wallet` as a global contract and record its code hash. `tla-manager`
-takes this hash at init and uses `use_global_contract` to put the wallet on each new
-sub-account, so the hash has to exist before `tla-manager` is deployed.
+There is nothing to deploy for the MPC signer: it is the live NEAR Chain
+Signatures contract, `v1.signer` on mainnet and `v1.signer-prod.testnet` on
+testnet. One consequence of that to internalize: every rented account's FullAccess
+key is derived from the tuple (path `hos-tla/<account>`, predecessor
+`<active-signer>`, ed25519 domain 1), so the `<active-signer>` account name is
+baked into every key ever minted. Redeploying active-signer under a different name
+orphans every existing account. The name is permanent; choose it accordingly.
 
 Deploy the `<council>` SputnikDAO with its four signers and the chosen threshold.
 Deploy it first, so the contracts below can be initialized with `<council>` as their
@@ -66,6 +69,7 @@ active-signer:
     new(admin: <council>,
         marketplace_authority: <hos-extension>,
         recovery_authority: <mpc-recovery>,
+        mpc_signer: v1.signer,
         timeout_secs: <secs>)
 
 mpc-recovery (the owner is immutable, there is no setter, so set it correctly here):
@@ -92,7 +96,8 @@ tla-registry:
         grace_period_ns: <ns>)
 
 The registry holds `active_signer` so it can verify a seller's supplied owner key
-against the wallet's live signer before a listing or accepted offer becomes buyable.
+against the account's live operating key before a listing or accepted offer becomes
+buyable.
 
 A note on `mpc-recovery`'s owner: it gates `install_policy` and `abort_recovery`, and
 an abort can be time-sensitive (cancelling a recovery aimed at a user). A full
@@ -108,8 +113,7 @@ For each TLA account (for example `acme.near`):
 
        new(registry: <registry>,
            active_signer: <active-signer>,
-           hos_extension: <hos-extension>,
-           wallet_code_hash: <hos-wallet-hash>,
+           mpc_signer: v1.signer,
            min_balance: <yocto>)
 
 2. Lock the TLA account. Remove every FullAccess key so only the `tla-manager`
@@ -160,6 +164,7 @@ can only be fixed by redeploying. Read it back and confirm it matches the layout
 
     near view <tla-registry> get_hos_extension  # expect <hos-extension>
     near view <tla-registry> get_active_signer  # expect <active-signer>
+    near view <active-signer> mpc_signer        # expect v1.signer
 
 Every TLA account is locked. For each TLA account, list its keys and confirm none has
 FullAccess permission:
@@ -187,7 +192,9 @@ Code hashes match the reproducible build:
 
 Smoke test, last:
 
-- Rent a sub-account, submit a signed request through `active-signer`, and confirm the
-  wallet executes it. Then confirm a wallet-ops request (AddExtension) submitted the
-  same way is rejected, and that a sale settles only when the wallet's extension set is
-  the canonical pair.
+- Rent a sub-account and list its keys: exactly one key, FullAccess, equal to the
+  key `v1.signer` derives for path `hos-tla/<account>` with `<active-signer>` as
+  predecessor. Submit a renter-signed transfer through
+  `active-signer.submit_signed_tx`, broadcast the returned signed transaction, and
+  confirm it executes. Then run a sale and confirm the old operating key no longer
+  verifies after the swap.
