@@ -515,7 +515,7 @@ async fn testnet_full_flow() -> Result<()> {
             "registry": registry,
             "active_signer": active_signer,
             "mpc_signer": V1_SIGNER,
-            "min_balance": near_amount(2),
+            "min_balance": Balance::from_yoctonear(10_000_000_000_000_000_000_000),
         }),
     )
     .await?;
@@ -527,7 +527,7 @@ async fn testnet_full_flow() -> Result<()> {
             "registry": registry,
             "active_signer": active_signer,
             "mpc_signer": V1_SIGNER,
-            "min_balance": near_amount(2),
+            "min_balance": Balance::from_yoctonear(10_000_000_000_000_000_000_000),
         }),
     )
     .await?;
@@ -588,13 +588,26 @@ async fn testnet_full_flow() -> Result<()> {
 
     println!("== OPERATE: renter signs, v1.signer signs, broadcast ==");
     let before = c.balance(&admin).await?;
+    let alice_before = c.balance(&wallet).await?;
     operate_transfer(
-        &c, &active_signer, &renter_id, &renter_key, &wallet, &mpc_pub, &admin, near_amount(1), 1,
+        &c,
+        &active_signer,
+        &renter_id,
+        &renter_key,
+        &wallet,
+        &mpc_pub,
+        &admin,
+        Balance::from_yoctonear(1_000_000_000_000_000_000_000),
+        1,
         &owner,
     )
     .await?;
+    let alice_after = c.balance(&wallet).await?;
     assert!(c.balance(&admin).await? > before, "operate transfer landed on chain");
-    println!("   transfer executed by the wallet's MPC key");
+    println!(
+        "   transfer executed by the wallet's OWN MPC key; alice paid {} yocto of gas+amount herself (HoS funded nothing)",
+        alice_before.as_yoctonear() - alice_after.as_yoctonear()
+    );
 
     println!("== LIST + BUY (sell) ==");
     c.send(
@@ -646,7 +659,7 @@ async fn testnet_full_flow() -> Result<()> {
                 "rent_tier_10": near_amount(1).as_yoctonear().to_string(),
                 "rent_tier_12plus": near_amount(1).as_yoctonear().to_string(),
                 "sub_fee_per_account": near_amount(1).as_yoctonear().to_string(),
-                "account_creation_deposit": near_amount(2).as_yoctonear().to_string(),
+                "account_creation_deposit": Balance::from_yoctonear(10_000_000_000_000_000_000_000).as_yoctonear().to_string(),
                 "business_max_subs": 1000,
                 "retraction_notice_ns": "1",
                 "resale_commission_bps": 0,

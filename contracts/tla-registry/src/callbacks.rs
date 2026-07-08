@@ -62,6 +62,60 @@ impl TlaRegistry {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    #[private]
+    pub fn on_sub_account_created_paid(
+        &mut self,
+        tla_id: AccountId,
+        name: String,
+        payer: AccountId,
+        owner_key: PublicKey,
+        rent_yocto: U128,
+        attached_yocto: U128,
+        #[callback_result] outcome: Result<MintOutcome, PromiseError>,
+    ) {
+        let key = sub_account_key(&tla_id, &name);
+        match outcome {
+            Ok(MintOutcome::Active) => {
+                let expires_at = self.record_paid_rental(&key, &payer, attached_yocto);
+                Event::SubAccountRented {
+                    full_name: key,
+                    tla_id,
+                    owner: payer,
+                    rent_yocto,
+                    expires_at,
+                }
+                .emit();
+            }
+            Ok(MintOutcome::SignerPending) => {
+                let expires_at = self.record_paid_rental(&key, &payer, attached_yocto);
+                self.signer_pending.insert(key.clone(), owner_key);
+                Event::SubAccountRented {
+                    full_name: key.clone(),
+                    tla_id,
+                    owner: payer.clone(),
+                    rent_yocto,
+                    expires_at,
+                }
+                .emit();
+                Event::SubAccountSignerPending {
+                    full_name: key,
+                    owner: payer,
+                }
+                .emit();
+            }
+            Ok(MintOutcome::CreationFailed) | Err(_) => {
+                self.settle_failed_mint(
+                    &key,
+                    &tla_id,
+                    &payer,
+                    attached_yocto,
+                    "paid sub-account creation failed",
+                );
+            }
+        }
+    }
+
     #[private]
     pub fn on_sub_account_re_rented(
         &mut self,
@@ -114,6 +168,19 @@ impl TlaRegistry {
             .0
             .saturating_add(self.fee_config.account_creation_deposit.0);
         self.refund_excess(payer, attached_yocto.0, charged);
+        match self.sub_accounts.get(key) {
+            Some(s) => s.expires_at,
+            None => ContractError::SubAccountNotFound.panic(),
+        }
+    }
+
+    fn record_paid_rental(&mut self, key: &str, payer: &AccountId, attached_yocto: U128) -> u64 {
+        self.sub_account_count = self.sub_account_count.saturating_add(1);
+        self.refund_excess(
+            payer,
+            attached_yocto.0,
+            self.fee_config.account_creation_deposit.0,
+        );
         match self.sub_accounts.get(key) {
             Some(s) => s.expires_at,
             None => ContractError::SubAccountNotFound.panic(),

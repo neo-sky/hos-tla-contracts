@@ -1,0 +1,21 @@
+# Audit ignores for the Valhalla handoff. Each entry is a transitive advisory
+# that is either not reachable in the deployed contract wasm or cannot be patched
+# without breaking the pinned reproducible toolchain (Rust 1.86.0). Reviewed for
+# the MPC full-access rework and the payment-authority settlement lane.
+[advisories]
+ignore = [
+    # time DoS via parse-time stack exhaustion. Pulled transitively by near-sdk
+    # (near-time -> near-primitives). Contracts never parse untrusted time input,
+    # so it is unreachable in the deployed wasm. The fix (time >= 0.3.47) requires
+    # Rust 1.88, which breaks the audit-pinned 1.86 reproducible build image.
+    "RUSTSEC-2026-0009",
+    # proc-macro-error2 unmaintained. Build-time proc macro only; not compiled into
+    # the contract wasm.
+    "RUSTSEC-2026-0173",
+    # wee_alloc unmaintained. The wasm allocator; no known exploit and deterministic
+    # behaviour. Standard for near-sdk contracts.
+    "RUSTSEC-2022-0054",
+    # anyhow Error::downcast_mut unsoundness. anyhow is used only in dev/integration
+    # tooling and the affected method is not used.
+    "RUSTSEC-2026-0190",
+]

@@ -48,6 +48,7 @@ enum StorageKey {
     ParkedNames,
     SignerPending,
     ReclaimPending,
+    PaymentAuthorities,
 }
 
 #[near(contract_state)]
@@ -73,6 +74,7 @@ pub struct TlaRegistry {
     pub(crate) parked_names: LookupMap<String, ParkedEntry>,
     pub(crate) signer_pending: LookupMap<String, PublicKey>,
     pub(crate) reclaim_pending: LookupMap<String, bool>,
+    pub(crate) payment_authorities: IterableSet<AccountId>,
     pub(crate) hos_extension: AccountId,
     pub(crate) active_signer: AccountId,
     pub(crate) parked_signer_pubkey: PublicKey,
@@ -130,6 +132,7 @@ impl TlaRegistry {
             parked_names: LookupMap::new(StorageKey::ParkedNames),
             signer_pending: LookupMap::new(StorageKey::SignerPending),
             reclaim_pending: LookupMap::new(StorageKey::ReclaimPending),
+            payment_authorities: IterableSet::new(StorageKey::PaymentAuthorities),
             hos_extension,
             active_signer,
             parked_signer_pubkey,
@@ -217,6 +220,14 @@ impl TlaRegistry {
             return Err(ContractError::OnlyAdmin);
         }
         Ok(())
+    }
+
+    pub(crate) fn assert_payment_authority(&self) -> Result<AccountId, ContractError> {
+        let caller = env::predecessor_account_id();
+        if !self.payment_authorities.contains(&caller) {
+            return Err(ContractError::OnlyPaymentAuthority);
+        }
+        Ok(caller)
     }
 
     pub(crate) fn assert_not_paused(&self) -> Result<(), ContractError> {

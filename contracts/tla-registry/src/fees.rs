@@ -40,7 +40,7 @@ pub fn default_fee_config() -> FeeConfig {
         rent_tier_10: U128(10 * ONE_NEAR),
         rent_tier_12plus: U128(5 * ONE_NEAR),
         sub_fee_per_account: U128(ONE_NEAR / 2),
-        account_creation_deposit: U128(2 * ONE_NEAR),
+        account_creation_deposit: U128(ONE_NEAR / 100),
         business_max_subs: 1000,
         retraction_notice_ns: U64(7 * 24 * 60 * 60 * 1_000_000_000),
         resale_commission_bps: 0,

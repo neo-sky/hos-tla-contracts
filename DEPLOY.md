@@ -105,6 +105,17 @@ council vote may be too slow for that, so consider a separate, faster recovery-o
 multisig here rather than the main council. Whatever you pick is permanent for this
 deployment.
 
+If fiat (Stripe) settlement is used, grant the backend's relay account payment
+authority on the registry through `<council>`:
+
+    tla-registry.add_payment_authority(account_id: <relay-licensee>)
+
+Payment authorities may call `rent_sub_account_paid` (attaching only the
+`account_creation_deposit`) and `buy_sub_account_paid` (attaching nothing). Neither
+method collects NEAR revenue or pays seller proceeds; the economic payment is
+settled off-chain and the registry only records the state change. Revoke with
+`remove_payment_authority`; both are admin-gated and emit events.
+
 ## 4. Per-TLA setup
 
 For each TLA account (for example `acme.near`):
@@ -114,7 +125,12 @@ For each TLA account (for example `acme.near`):
        new(registry: <registry>,
            active_signer: <active-signer>,
            mpc_signer: v1.signer,
-           min_balance: <yocto>)
+           min_balance: 10000000000000000000000)   # 0.01 NEAR: covers account storage, no spendable prefund
+
+`min_balance` is the funding transferred into each new sub-account. Keep it near the
+storage floor (~0.003 NEAR); the account is created empty and per-action gas is paid
+at purchase time, not prefunded. It must be <= the registry's
+`account_creation_deposit` or `create_sub_account` reverts; both default to 0.01 NEAR.
 
 2. Lock the TLA account. Remove every FullAccess key so only the `tla-manager`
    methods are callable. This is a hard requirement: a TLA account that keeps a
@@ -154,6 +170,7 @@ Admin and minter sets, read from chain (not from your deploy notes):
     near view <active-signer> minters        # expect exactly the TLA accounts you added
     near view <hos-extension> get_admins     # expect exactly [<council>]
     near view <tla-registry>  get_admins     # expect exactly [<council>]
+    near view <tla-registry>  get_payment_authorities  # expect exactly the relay licensee, or []
 
 A bootstrap or deployer key left in any admin set is a single-key backdoor next to the
 multisig. If any set has more than `<council>` in it, stop and remove the extra before

@@ -125,6 +125,10 @@ impl TlaRegistry {
         self.admins.iter().cloned().collect()
     }
 
+    pub fn get_payment_authorities(&self) -> Vec<AccountId> {
+        self.payment_authorities.iter().cloned().collect()
+    }
+
     pub fn get_ft_allowlist(&self) -> Vec<AccountId> {
         self.ft_allowlist.iter().cloned().collect()
     }

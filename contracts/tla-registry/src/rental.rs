@@ -196,6 +196,90 @@ impl TlaRegistry {
 
     #[handle_result]
     #[payable]
+    pub fn rent_sub_account_paid(
+        &mut self,
+        tla_id: AccountId,
+        name: String,
+        owner_key: PublicKey,
+        main_wallet: AccountId,
+    ) -> Result<Promise, ContractError> {
+        self.assert_not_paused()?;
+        let payer = self.assert_payment_authority()?;
+        validate_name(&name)?;
+        if !hos_common::is_ed25519(&owner_key) {
+            return Err(ContractError::NotEd25519);
+        }
+
+        let key = sub_account_key(&tla_id, &name);
+        if self.sub_accounts.contains_key(&key) || self.parked_names.contains_key(&key) {
+            return Err(ContractError::SubAccountNameTaken);
+        }
+        if main_wallet.as_str() == key {
+            return Err(ContractError::MainWalletEqualsSubAccount);
+        }
+
+        let rent;
+        let is_business;
+        {
+            let entry = self.tlas.get(&tla_id).ok_or(ContractError::TlaNotFound)?;
+            if !entry.is_accepting_rentals() {
+                return Err(ContractError::TlaNotAcceptingRentals);
+            }
+            is_business = entry.tla_type == TlaType::Business;
+            if is_business {
+                let licensee = entry
+                    .licensee
+                    .as_ref()
+                    .ok_or(ContractError::BusinessTlaMissingLicensee)?;
+                if &main_wallet != licensee {
+                    return Err(ContractError::OnlyLicensee);
+                }
+            }
+            rent = fees::calculate_rent(entry, &tla_id, &name, &self.fee_config);
+        }
+
+        let creation_deposit = self.fee_config.account_creation_deposit.0;
+        let attached = env::attached_deposit();
+        if attached.as_yoctonear() < creation_deposit {
+            return Err(ContractError::InsufficientPayment);
+        }
+
+        self.ensure_mother_default(&payer);
+        if is_business {
+            self.business_count_check_and_bump(&tla_id)?;
+        }
+
+        let now = env::block_timestamp();
+        let sub_entry = SubAccountEntry {
+            owner: payer.clone(),
+            tla_id: tla_id.clone(),
+            main_wallet,
+            rented_at: now,
+            expires_at: now.saturating_add(ONE_YEAR_NS),
+            retraction_at: None,
+        };
+        self.sub_accounts.insert(key, sub_entry);
+
+        Ok(ext_tla_manager::ext(tla_id.clone())
+            .with_attached_deposit(NearToken::from_yoctonear(creation_deposit))
+            .with_static_gas(GAS_FOR_CREATE)
+            .create_sub_account(name.clone(), owner_key.clone())
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_CALLBACK)
+                    .on_sub_account_created_paid(
+                        tla_id,
+                        name,
+                        payer,
+                        owner_key,
+                        U128(rent),
+                        U128(attached.as_yoctonear()),
+                    ),
+            ))
+    }
+
+    #[handle_result]
+    #[payable]
     pub fn renew_tla(&mut self, tla_id: AccountId) -> Result<(), ContractError> {
         self.assert_not_paused()?;
         let caller = env::predecessor_account_id();

@@ -231,7 +231,7 @@ async fn deploy_singletons(tla_name: &str) -> Result<Singletons> {
             "registry": registry.id(),
             "active_signer": active_signer.id(),
             "mpc_signer": test_mpc.id(),
-            "min_balance": NearToken::from_near(2),
+            "min_balance": NearToken::from_millinear(10),
         }))
         .transact()
         .await?
@@ -542,7 +542,7 @@ async fn full_registry_mint_flow() -> Result<()> {
     let (msg, proof) = signed_transfer(
         &wallet_id,
         recipient.id(),
-        NearToken::from_near(1),
+        NearToken::from_millinear(1),
         1,
         &owner,
     );
@@ -570,7 +570,7 @@ async fn full_registry_mint_flow() -> Result<()> {
     let after = recipient.view_account().await?.balance;
     assert_eq!(
         after.as_yoctonear() - before.as_yoctonear(),
-        NearToken::from_near(1).as_yoctonear(),
+        NearToken::from_millinear(1).as_yoctonear(),
         "minted wallet should transfer to recipient"
     );
 

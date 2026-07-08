@@ -132,6 +132,34 @@ impl TlaRegistry {
     }
 
     #[handle_result]
+    pub fn add_payment_authority(&mut self, account_id: AccountId) -> Result<(), ContractError> {
+        self.assert_admin()?;
+        if !self.payment_authorities.insert(account_id.clone()) {
+            return Ok(());
+        }
+        Event::PaymentAuthorityAdded {
+            account: account_id,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    #[handle_result]
+    pub fn remove_payment_authority(&mut self, account_id: AccountId) -> Result<(), ContractError> {
+        self.assert_admin()?;
+        if !self.payment_authorities.remove(&account_id) {
+            return Ok(());
+        }
+        Event::PaymentAuthorityRemoved {
+            account: account_id,
+            by: env::predecessor_account_id(),
+        }
+        .emit();
+        Ok(())
+    }
+
+    #[handle_result]
     pub fn update_fee_config(&mut self, config: FeeConfig) -> Result<(), ContractError> {
         self.assert_admin()?;
         if config.rent_tier_5.0 == 0

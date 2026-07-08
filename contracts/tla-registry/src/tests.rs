@@ -13,6 +13,7 @@ const SIGNER: &str = "active-signer.testnet";
 const TLA: &str = "mytla";
 const ALICE: &str = "alice.testnet";
 const BOB: &str = "bob.testnet";
+const CAROL: &str = "carol.testnet";
 const PARKED_KEY: &str = "ed25519:DcA2MzgpJbrUATQLLceocVckhhAqrkingax4oJ9kZ847";
 const GRACE_NS: u64 = 30 * 24 * 60 * 60 * 1_000_000_000;
 const DAY_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
@@ -195,6 +196,16 @@ mod tla_admin {
     }
 
     #[test]
+    fn admin_controls_payment_authorities() {
+        let mut c = deploy();
+        ctx(ADMIN, 0, 0);
+        c.add_payment_authority(acc(BOB)).unwrap();
+        assert_eq!(c.get_payment_authorities(), vec![acc(BOB)]);
+        c.remove_payment_authority(acc(BOB)).unwrap();
+        assert!(c.get_payment_authorities().is_empty());
+    }
+
+    #[test]
     fn duplicate_registration_rejected() {
         let mut c = deploy_with_open_tla();
         ctx(ADMIN, 0, 0);
@@ -284,6 +295,45 @@ mod rental {
             c.rent_sub_account(acc(TLA), "alice".to_string(), parked_key(), acc(&sub)),
             Err(ContractError::MainWalletEqualsSubAccount)
         ));
+    }
+
+    #[test]
+    fn paid_rent_requires_authority_and_only_account_creation_deposit() {
+        let mut c = deploy_with_open_tla();
+        let creation = c.get_fee_config().account_creation_deposit.0;
+        let rent = c
+            .get_rent_price(acc(TLA), "alice".to_string())
+            .unwrap()
+            .rent_yocto
+            .0;
+
+        ctx(BOB, creation, 1);
+        assert!(matches!(
+            c.rent_sub_account_paid(acc(TLA), "alice".to_string(), parked_key(), acc(ALICE)),
+            Err(ContractError::OnlyPaymentAuthority)
+        ));
+
+        ctx(ADMIN, 0, 1);
+        c.add_payment_authority(acc(BOB)).unwrap();
+        ctx(BOB, creation, 1);
+        let _ = c
+            .rent_sub_account_paid(acc(TLA), "alice".to_string(), parked_key(), acc(ALICE))
+            .unwrap();
+        c.on_sub_account_created_paid(
+            acc(TLA),
+            "alice".to_string(),
+            acc(BOB),
+            parked_key(),
+            U128(rent),
+            U128(creation),
+            Ok(MintOutcome::Active),
+        );
+
+        let view = c.get_sub_account(acc(TLA), "alice".to_string()).unwrap();
+        assert_eq!(view.owner, acc(BOB));
+        assert_eq!(view.main_wallet, acc(ALICE));
+        assert_eq!(c.get_stats().total_revenue_yocto.0, 0);
+        assert_eq!(c.get_pending_refund(acc(BOB)).0, 0);
     }
 
     #[test]
@@ -688,6 +738,43 @@ mod marketplace {
         assert_eq!(c.get_pending_refund(acc(BOB)).0, 20);
         let view = c.get_sub_account(acc(TLA), "alice".to_string()).unwrap();
         assert_eq!(view.owner, acc(BOB));
+        assert!(c.get_listing(acc(TLA), "alice".to_string()).is_none());
+    }
+
+    #[test]
+    fn paid_buy_skips_near_proceeds_and_sets_main_wallet_to_buyer() {
+        let mut c = deploy_with_open_tla();
+        rent_alice_sub(&mut c, "alice");
+        list_alice(&mut c, 100);
+        let revenue_before = c.get_stats().total_revenue_yocto.0;
+
+        ctx(ADMIN, 0, 2);
+        c.add_payment_authority(acc(BOB)).unwrap();
+        ctx(BOB, 0, 2);
+        let _ = c
+            .buy_sub_account_paid(acc(TLA), "alice".to_string(), acc(CAROL), parked_key())
+            .unwrap();
+        assert!(
+            c.get_listing(acc(TLA), "alice".to_string())
+                .unwrap()
+                .settling
+        );
+
+        c.on_sub_account_sold_paid(
+            acc(TLA),
+            "alice".to_string(),
+            acc(CAROL),
+            acc(BOB),
+            U128(100),
+            Ok(true),
+        );
+
+        assert_eq!(c.get_stats().total_revenue_yocto.0, revenue_before);
+        assert_eq!(c.get_pending_refund(acc(ALICE)).0, 0);
+        assert_eq!(c.get_pending_refund(acc(CAROL)).0, 0);
+        let view = c.get_sub_account(acc(TLA), "alice".to_string()).unwrap();
+        assert_eq!(view.owner, acc(BOB));
+        assert_eq!(view.main_wallet, acc(CAROL));
         assert!(c.get_listing(acc(TLA), "alice".to_string()).is_none());
     }
 

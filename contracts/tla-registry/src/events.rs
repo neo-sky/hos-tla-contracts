@@ -53,6 +53,10 @@ pub enum Event {
         by: AccountId,
     },
     #[event_version("1.0.0")]
+    PaymentAuthorityAdded { account: AccountId, by: AccountId },
+    #[event_version("1.0.0")]
+    PaymentAuthorityRemoved { account: AccountId, by: AccountId },
+    #[event_version("1.0.0")]
     WithdrawalQueued {
         amount_yocto: U128,
         recipient: AccountId,
